@@ -627,6 +627,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "corral-supervisor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "corral-tls"
 version = "0.1.0"
 dependencies = [

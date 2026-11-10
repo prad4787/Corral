@@ -1,0 +1,18 @@
+[package]
+name = "corral-supervisor"
+description = "Child process supervision for Corral (start, stop, restart with backoff, logs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
