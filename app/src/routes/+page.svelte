@@ -2,9 +2,9 @@
   import { onMount } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-  import { api, type Overview } from "$lib/api";
+  import { api, type Overview, type MailSummary, type MailDetail, type Dump, type LogEntry } from "$lib/api";
 
-  type View = "overview" | "site" | "services" | "settings";
+  type View = "overview" | "site" | "services" | "mail" | "dumps" | "settings";
 
   let data = $state<Overview | null>(null);
   let view = $state<View>("overview");
@@ -24,6 +24,16 @@
   let showNew = $state(false);
   let newName = $state("");
   let newKit = $state("none");
+  // mail
+  let mails = $state<MailSummary[]>([]);
+  let mail = $state<MailDetail | null>(null);
+  let mailPane = $state<"html" | "text" | "headers">("html");
+  // dumps
+  let dumps = $state<Dump[]>([]);
+  // logs for the selected site
+  let logs = $state<LogEntry[] | null>(null);
+  let logLevel = $state("");
+  let openTrace = $state<number | null>(null);
 
   const site = $derived(data?.sites.find((s) => s.name === selected) ?? null);
   const filtered = $derived(
@@ -84,6 +94,44 @@
     view = "site";
     envText = null;
     envFor = null;
+    logs = null;
+  }
+
+  async function refreshInbox() {
+    try {
+      if (view === "mail") mails = await api.mailList();
+      if (view === "dumps") dumps = await api.dumpsList();
+    } catch {
+      /* ignore while polling */
+    }
+  }
+
+  function show(v: View) {
+    view = v;
+    mail = null;
+    refreshInbox();
+  }
+
+  async function openMail(id: string) {
+    await act("mail", async () => {
+      mail = await api.mailDetail(id);
+      mailPane = mail.html ? "html" : "text";
+    });
+  }
+
+  async function loadLogs(site: string) {
+    await act("logs", async () => {
+      logs = await api.siteLogs(site, logLevel || undefined);
+      openTrace = null;
+    });
+  }
+
+  function fmtTime(secs: number) {
+    return new Date(secs * 1000).toLocaleString();
+  }
+
+  function fmtSize(n: number) {
+    return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
   }
 
   async function loadEnv(name: string) {
@@ -132,10 +180,11 @@
   onMount(() => {
     run("load", api.overview);
     // Pick up changes made from the CLI.
-    const t = setInterval(
-      () => !busy && api.overview().then((d) => (data = d)).catch(() => {}),
-      3000,
-    );
+    const t = setInterval(() => {
+      if (busy) return;
+      api.overview().then((d) => (data = d)).catch(() => {});
+      refreshInbox();
+    }, 3000);
     return () => clearInterval(t);
   });
 </script>
@@ -214,8 +263,10 @@
 
       <nav class="tabs" aria-label="Sections">
         <button class:active={view === "overview" || view === "site"} onclick={() => (view = "overview")}>Sites</button>
-        <button class:active={view === "services"} onclick={() => (view = "services")}>Services</button>
-        <button class:active={view === "settings"} onclick={() => (view = "settings")}>Settings</button>
+        <button class:active={view === "services"} onclick={() => show("services")}>Services</button>
+        <button class:active={view === "mail"} onclick={() => show("mail")}>Mail</button>
+        <button class:active={view === "dumps"} onclick={() => show("dumps")}>Dumps</button>
+        <button class:active={view === "settings"} onclick={() => show("settings")}>Settings</button>
       </nav>
 
       <input class="search" placeholder="Search sites" bind:value={query} aria-label="Search sites" />
@@ -328,6 +379,112 @@
             <button class="btn" onclick={() => loadEnv(site.name)} disabled={!!busy}>Show and edit .env</button>
           {/if}
         </section>
+
+        <section>
+          <div class="head">
+            <h2>Logs</h2>
+            <span class="row">
+              <select bind:value={logLevel} onchange={() => logs && loadLogs(site.name)} aria-label="Minimum level">
+                <option value="">All levels</option>
+                <option value="warning">Warning+</option>
+                <option value="error">Error+</option>
+              </select>
+              <button class="btn small" onclick={() => loadLogs(site.name)} disabled={!!busy}>{logs ? "Refresh" : "Show logs"}</button>
+            </span>
+          </div>
+          {#if logs}
+            {#each logs as e, i (i)}
+              <div class="log lvl-{e.level}">
+                <button class="rowbtn" onclick={() => (openTrace = openTrace === i ? null : i)}>
+                  <span class="badge">{e.level}</span>
+                  <small>{e.time}</small>
+                  <span class="msg">{e.message.length > 240 ? e.message.slice(0, 240) + "…" : e.message}</span>
+                </button>
+                {#if openTrace === i}
+                  <pre class="mono box">{e.message}{e.details ? "\n\n" + e.details : ""}</pre>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">No log entries{logLevel ? " at this level" : ""}.</p>
+            {/each}
+          {/if}
+        </section>
+      {:else if view === "mail"}
+        <div class="head">
+          <h1>Mail</h1>
+          <button class="btn small" disabled={!mails.length} onclick={() => act("clear", async () => { await api.mailClear(); mail = null; mails = []; })}>Clear all</button>
+        </div>
+        <p class="sub">Every mail sent to SMTP 127.0.0.1:2525 is caught here and never delivered. In Laravel: <code>MAIL_MAILER=smtp MAIL_HOST=127.0.0.1 MAIL_PORT=2525</code></p>
+        {#if mail}
+          <button class="link" onclick={() => (mail = null)}>← All mail</button>
+          <h2 class="subject">{mail.subject || "(no subject)"}</h2>
+          <dl class="grid tight">
+            <dt>From</dt><dd>{mail.from}</dd>
+            <dt>To</dt><dd>{mail.to.join(", ")}</dd>
+            {#if mail.cc.length}<dt>Cc</dt><dd>{mail.cc.join(", ")}</dd>{/if}
+            {#if mail.envelope_to.join() !== mail.to.join()}<dt>Envelope</dt><dd>{mail.envelope_to.join(", ")}</dd>{/if}
+            <dt>Received</dt><dd>{fmtTime(mail.received)} · {fmtSize(mail.size)}</dd>
+          </dl>
+          {#if mail.attachment_list.length}
+            <div class="buttons">
+              {#each mail.attachment_list as a (a.index)}
+                <button class="btn small" onclick={() => act("att", async () => {
+                  const p = await api.mailSaveAttachment(mail!.id, a.index);
+                  notice = `Saved to ${p}`;
+                  revealItemInDir(p);
+                })}>📎 {a.name} ({fmtSize(a.size)})</button>
+              {/each}
+            </div>
+          {/if}
+          <div class="seg">
+            <button class:active={mailPane === "html"} disabled={!mail.html} onclick={() => (mailPane = "html")}>HTML</button>
+            <button class:active={mailPane === "text"} disabled={!mail.text} onclick={() => (mailPane = "text")}>Text</button>
+            <button class:active={mailPane === "headers"} onclick={() => (mailPane = "headers")}>Headers</button>
+            <button class="danger" onclick={() => act("del", async () => { await api.mailDelete(mail!.id); mail = null; await refreshInbox(); })}>Delete</button>
+          </div>
+          {#if mailPane === "html" && mail.html}
+            <!-- No sandbox permissions: scripts, forms and navigation in mail are blocked. -->
+            <iframe class="mailframe" title="Mail HTML" sandbox="" srcdoc={mail.html}></iframe>
+          {:else if mailPane === "text"}
+            <pre class="mono box">{mail.text ?? ""}</pre>
+          {:else}
+            <table class="headers">
+              <tbody>
+                {#each mail.headers as [k, v], i (i)}<tr><th>{k}</th><td>{v}</td></tr>{/each}
+              </tbody>
+            </table>
+          {/if}
+        {:else}
+          <ul class="list">
+            {#each mails as m (m.id)}
+              <li class="clickable">
+                <button class="rowbtn" onclick={() => openMail(m.id)}>
+                  <strong>{m.subject || "(no subject)"}</strong>
+                  <small>{m.from} → {m.to.join(", ")} · {fmtTime(m.received)}{m.attachments ? ` · 📎 ${m.attachments}` : ""}</small>
+                </button>
+              </li>
+            {:else}
+              <p class="empty">No mail caught yet.</p>
+            {/each}
+          </ul>
+        {/if}
+      {:else if view === "dumps"}
+        <div class="head">
+          <h1>Dumps</h1>
+          <button class="btn small" disabled={!dumps.length} onclick={() => act("clear", async () => { await api.dumpsClear(); dumps = []; })}>Clear</button>
+        </div>
+        <p class="sub">Output of <code>dump()</code> and <code>dd()</code> from your sites while Corral is running. Your pages stay clean.</p>
+        {#each dumps as d (d.id)}
+          <article class="dump">
+            <header>
+              <span class="mono">{d.file ? `${d.file.split("/").slice(-3).join("/")}:${d.line ?? ""}` : "unknown source"}</span>
+              <small>{new Date(d.time * 1000).toLocaleTimeString()}{d.uri ? ` · ${d.uri}` : ""}</small>
+            </header>
+            <pre class="mono">{d.text}</pre>
+          </article>
+        {:else}
+          <p class="empty">No dumps yet. Add <code>dump($something)</code> to a controller and reload the page.</p>
+        {/each}
       {:else if view === "services" && data}
         <h1>Services</h1>
         <p class="sub">Run on 127.0.0.1 only. Data stays in Corral's folder until you remove it.</p>
@@ -599,6 +756,32 @@
     font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text);
   }
+  .tabs { flex-wrap: wrap; }
+  .tabs button { flex: 1 0 30%; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .head h2 { margin: 28px 0 8px; }
+  .subject { text-transform: none; letter-spacing: 0; color: var(--text); font-size: 17px; margin: 14px 0 10px; }
+  .grid.tight { gap: 4px 12px; margin-bottom: 12px; }
+  .seg { display: flex; gap: 4px; margin: 12px 0 8px; }
+  .seg button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  .seg button.active { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .seg button.danger { margin-left: auto; color: var(--danger); }
+  .mailframe { width: 100%; height: 60vh; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .box { white-space: pre-wrap; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); max-height: 60vh; overflow: auto; }
+  table.headers { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.headers th { text-align: left; vertical-align: top; padding: 4px 10px 4px 0; color: var(--muted); white-space: nowrap; font-weight: 500; }
+  table.headers td { padding: 4px 0; word-break: break-all; font-family: ui-monospace, Menlo, monospace; }
+  .list li.clickable { padding: 0; }
+  .rowbtn { all: unset; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 10px 12px; box-sizing: border-box; cursor: default; }
+  .rowbtn:hover { background: var(--hover); border-radius: 8px; }
+  .dump { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin-bottom: 10px; overflow: hidden; }
+  .dump header { display: flex; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .dump pre { margin: 0; padding: 10px 12px; white-space: pre-wrap; max-height: 40vh; overflow: auto; }
+  .log { border-bottom: 1px solid var(--border); }
+  .log .rowbtn { flex-direction: row; align-items: baseline; gap: 8px; padding: 6px 4px; }
+  .log .msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log.lvl-error .badge, .log.lvl-critical .badge, .log.lvl-alert .badge, .log.lvl-emergency .badge { color: var(--danger); }
+  .log.lvl-warning .badge { color: #b7791f; }
   .setup { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
   .steps { list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; counter-reset: step; }
   .steps li {

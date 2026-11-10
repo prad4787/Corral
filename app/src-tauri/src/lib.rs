@@ -554,6 +554,84 @@ async fn new_project(
     ov!(app, state)
 }
 
+fn mail_store(state: &AppState) -> corral_mail::Store {
+    corral_mail::Store::new(corral_mail::store_dir(&state.paths.root))
+}
+
+#[tauri::command]
+fn mail_list(state: State<'_, AppState>, limit: Option<usize>) -> Vec<corral_mail::Summary> {
+    mail_store(&state).list(limit.unwrap_or(200))
+}
+
+#[tauri::command]
+fn mail_detail(state: State<'_, AppState>, id: String) -> CmdResult<corral_mail::Detail> {
+    mail_store(&state).detail(&id).map_err(err)
+}
+
+#[tauri::command]
+fn mail_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    mail_store(&state).delete(&id).map_err(err)
+}
+
+#[tauri::command]
+fn mail_clear(state: State<'_, AppState>) -> CmdResult<usize> {
+    mail_store(&state).clear().map_err(err)
+}
+
+/// Save an attachment to ~/Downloads (never overwriting) and return its path.
+#[tauri::command]
+fn mail_save_attachment(state: State<'_, AppState>, id: String, index: usize) -> CmdResult<String> {
+    let (name, bytes) = mail_store(&state).attachment(&id, index).map_err(err)?;
+    let dir = home().join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    let base = std::path::Path::new(&name);
+    let (stem, ext) = (
+        base.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("attachment"),
+        base.extension().and_then(|s| s.to_str()),
+    );
+    let mut path = dir.join(&name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(match ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        });
+        n += 1;
+    }
+    std::fs::write(&path, bytes).map_err(err)?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn dumps_list(state: State<'_, AppState>, limit: Option<usize>) -> Vec<corral_dumps::Dump> {
+    corral_dumps::Store::new(corral_dumps::store_file(&state.paths.root)).list(limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn dumps_clear(state: State<'_, AppState>) -> CmdResult<()> {
+    corral_dumps::Store::new(corral_dumps::store_file(&state.paths.root))
+        .clear()
+        .map_err(err)
+}
+
+#[tauri::command]
+fn site_logs(
+    state: State<'_, AppState>,
+    site: String,
+    level: Option<String>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<corral_core::logs::Entry>> {
+    use corral_core::logs;
+    let path = site_path(&state, &site)?;
+    let Some(file) = logs::log_files(&path).into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    let min = level.as_deref().and_then(logs::Level::parse);
+    logs::tail(&file, 4 << 20, limit.unwrap_or(100), min).map_err(err)
+}
+
 /// Open a project folder in an editor or terminal.
 #[tauri::command]
 fn open_in(path: String, target: String) -> CmdResult<()> {
@@ -752,7 +830,15 @@ pub fn run() {
             write_php_ini,
             node_install,
             node_use,
-            new_project
+            new_project,
+            mail_list,
+            mail_detail,
+            mail_delete,
+            mail_clear,
+            mail_save_attachment,
+            dumps_list,
+            dumps_clear,
+            site_logs
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

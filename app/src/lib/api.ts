@@ -45,6 +45,47 @@ export interface Overview {
   https_port: number;
 }
 
+export interface MailSummary {
+  id: string;
+  received: number;
+  from: string;
+  to: string[];
+  subject: string;
+  size: number;
+  attachments: number;
+  envelope_from: string;
+  envelope_to: string[];
+}
+
+export interface MailDetail extends MailSummary {
+  cc: string[];
+  date: string | null;
+  html: string | null;
+  text: string | null;
+  headers: [string, string][];
+  attachment_list: { index: number; name: string; content_type: string; size: number }[];
+}
+
+export interface Dump {
+  id: number;
+  time: number;
+  label: string | null;
+  html: string;
+  text: string;
+  file: string | null;
+  line: number | null;
+  sapi: string | null;
+  uri: string | null;
+}
+
+export interface LogEntry {
+  time: string;
+  env: string;
+  level: string;
+  message: string;
+  details: string;
+}
+
 export const api = {
   overview: () => invoke<Overview>("overview"),
   park: (dir: string) => invoke<Overview>("park", { dir }),
@@ -74,4 +115,13 @@ export const api = {
   nodeInstall: (major?: number) => invoke<Overview>("node_install", { major }),
   nodeUse: (major: number) => invoke<Overview>("node_use", { major }),
   newProject: (name: string, kit: string) => invoke<Overview>("new_project", { name, kit }),
+  mailList: () => invoke<MailSummary[]>("mail_list", {}),
+  mailDetail: (id: string) => invoke<MailDetail>("mail_detail", { id }),
+  mailDelete: (id: string) => invoke<void>("mail_delete", { id }),
+  mailClear: () => invoke<number>("mail_clear"),
+  mailSaveAttachment: (id: string, index: number) =>
+    invoke<string>("mail_save_attachment", { id, index }),
+  dumpsList: () => invoke<Dump[]>("dumps_list", {}),
+  dumpsClear: () => invoke<void>("dumps_clear"),
+  siteLogs: (site: string, level?: string) => invoke<LogEntry[]>("site_logs", { site, level }),
 };
