@@ -30,6 +30,12 @@ Rules for every phase:
 | 1.8 CLI | ✅ Done (direct) | Talks to the files directly. The HTTP API (5.1) is still open |
 | 1.9 UI | 🟡 Partial | Sites, detail, PHP, start/stop. Onboarding, tray and launch-at-login are open |
 | 1.10 Uninstall | ⏳ Open | |
+| 3.1 MySQL | ✅ Done (pulled forward) | 8.4.11 pinned by SHA-256; `corral service`/`corral db`; validated with a real Laravel 11 app (48 migrations + seeders) |
+
+**Real-machine validation (2026-11-10, macOS 26.6.2 arm64, another local PHP tool running alongside):**
+`scripts/spike-e2e.sh` passes 13/13 checks. Two real Laravel apps (11 and 12) are served over trusted HTTPS on :18443, with another tool's DNS
+resolving `.test`. Bugs found and fixed this way: orphaned children after SIGTERM, an FPM-socket startup race, deprecation log
+flooding, pools not reloading after config changes, MySQL datadir parents missing, and MySQL root not reachable over TCP.
 
 ---
 
