@@ -973,9 +973,40 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_main(app);
+        .run(|app, event| match event {
+            tauri::RunEvent::Reopen { .. } => show_main(app),
+            // ⌘Q / Dock → Quit: stop the engine (and its children) first.
+            tauri::RunEvent::ExitRequested { api, .. } if running(app) => {
+                api.prevent_exit();
+                let state = app.state::<AppState>();
+                stop_engine_inner(app, &state);
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let paths = app.state::<AppState>().paths.clone();
+                    for _ in 0..240 {
+                        if !orphans::engine_running(&paths) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    app.exit(0);
+                });
             }
+            // An Apple-Event quit (Dock, logout, `osascript … quit`) arrives as
+            // Exit without ExitRequested: stop the engine synchronously. The
+            // async runtime keeps running on its own threads meanwhile.
+            tauri::RunEvent::Exit => {
+                let state = app.state::<AppState>();
+                if running(app) {
+                    stop_engine_inner(app, &state);
+                    for _ in 0..240 {
+                        if !orphans::engine_running(&state.paths) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+            }
+            _ => {}
         });
 }
