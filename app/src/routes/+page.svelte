@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-  import { api, type Overview, type MailSummary, type MailDetail, type Dump, type LogEntry } from "$lib/api";
+  import { api, type Overview, type MailSummary, type MailDetail, type Dump, type LogEntry, type WatchEvent } from "$lib/api";
 
   type View = "overview" | "site" | "services" | "mail" | "dumps" | "settings";
 
@@ -30,6 +30,10 @@
   let mailPane = $state<"html" | "text" | "headers">("html");
   // dumps
   let dumps = $state<Dump[]>([]);
+  let events = $state<WatchEvent[]>([]);
+  let dumpPane = $state<"dumps" | "activity">("dumps");
+  let eventKind = $state("");
+  const shownEvents = $derived(eventKind ? events.filter((e) => e.kind === eventKind) : events);
   // logs for the selected site
   let logs = $state<LogEntry[] | null>(null);
   let logLevel = $state("");
@@ -100,7 +104,10 @@
   async function refreshInbox() {
     try {
       if (view === "mail") mails = await api.mailList();
-      if (view === "dumps") dumps = await api.dumpsList();
+      if (view === "dumps") {
+        dumps = await api.dumpsList();
+        events = await api.eventsList();
+      }
     } catch {
       /* ignore while polling */
     }
@@ -128,6 +135,19 @@
 
   function fmtTime(secs: number) {
     return new Date(secs * 1000).toLocaleString();
+  }
+
+  function eventSummary(e: WatchEvent): string {
+    const d = e.data;
+    switch (e.kind) {
+      case "query": return `${Number(d.time_ms ?? 0).toFixed(2)} ms  ${d.sql}`;
+      case "http": return `${d.method} ${d.url} → ${d.status ?? d.error ?? "?"}`;
+      case "log": return `${d.level}: ${d.message}`;
+      case "view": return String(d.name);
+      case "cache": return `${d.op} ${d.key}`;
+      case "job": return `${d.name} ${d.status}${d.error ? ": " + d.error : ""}`;
+    }
+    return JSON.stringify(d);
   }
 
   function fmtSize(n: number) {
@@ -470,9 +490,36 @@
         {/if}
       {:else if view === "dumps"}
         <div class="head">
-          <h1>Dumps</h1>
-          <button class="btn small" disabled={!dumps.length} onclick={() => act("clear", async () => { await api.dumpsClear(); dumps = []; })}>Clear</button>
+          <h1>{dumpPane === "dumps" ? "Dumps" : "Activity"}</h1>
+          {#if dumpPane === "dumps"}
+            <button class="btn small" disabled={!dumps.length} onclick={() => act("clear", async () => { await api.dumpsClear(); dumps = []; })}>Clear</button>
+          {:else}
+            <button class="btn small" disabled={!events.length} onclick={() => act("clear", async () => { await api.eventsClear(); events = []; })}>Clear</button>
+          {/if}
         </div>
+        <div class="seg">
+          <button class:active={dumpPane === "dumps"} onclick={() => (dumpPane = "dumps")}>dump() / dd()</button>
+          <button class:active={dumpPane === "activity"} onclick={() => (dumpPane = "activity")}>Queries, HTTP, logs…</button>
+        </div>
+        {#if dumpPane === "activity"}
+          <p class="sub">From Laravel sites with watchers enabled (<code>corral watch enable</code> in the project).</p>
+          <div class="seg">
+            {#each ["", "query", "http", "log", "view", "cache", "job"] as k (k)}
+              <button class:active={eventKind === k} onclick={() => (eventKind = k)}>{k || "all"}</button>
+            {/each}
+          </div>
+          {#each shownEvents as e (e.id)}
+            <div class="log">
+              <div class="rowbtn">
+                <span class="badge">{e.kind}</span>
+                <small>{new Date(e.time * 1000).toLocaleTimeString()}</small>
+                <span class="msg mono">{eventSummary(e)}</span>
+              </div>
+            </div>
+          {:else}
+            <p class="empty">No activity yet.</p>
+          {/each}
+        {:else}
         <p class="sub">Output of <code>dump()</code> and <code>dd()</code> from your sites while Corral is running. Your pages stay clean.</p>
         {#each dumps as d (d.id)}
           <article class="dump">
@@ -485,6 +532,7 @@
         {:else}
           <p class="empty">No dumps yet. Add <code>dump($something)</code> to a controller and reload the page.</p>
         {/each}
+        {/if}
       {:else if view === "services" && data}
         <h1>Services</h1>
         <p class="sub">Run on 127.0.0.1 only. Data stays in Corral's folder until you remove it.</p>
@@ -511,11 +559,25 @@
             <p class="empty">No services yet.</p>
           {/each}
         </ul>
-        {#if !data.services.some((s) => s.kind === "mysql")}
-          <button class="btn primary add" disabled={!!busy} onclick={() => run("mysql", () => api.install("mysql"))}>
-            {busy === "mysql" ? "Installing MySQL (≈170 MB)…" : "Add MySQL 8.4"}
-          </button>
-        {/if}
+        <div class="buttons">
+          {#if !data.services.some((s) => s.kind === "mysql")}
+            <button class="btn primary" disabled={!!busy} onclick={() => run("mysql", () => api.install("mysql"))}>
+              {busy === "mysql" ? "Installing MySQL (≈170 MB)…" : "Add MySQL 8.4"}
+            </button>
+          {/if}
+          {#if !data.services.some((s) => s.kind === "postgres")}
+            <button class="btn" disabled={!!busy} onclick={() => run("postgres", () => api.install("postgres"))}
+              title="Built from verified source; needs Xcode command line tools">
+              {busy === "postgres" ? "Building PostgreSQL (a few minutes)…" : "Add PostgreSQL 18"}
+            </button>
+          {/if}
+          {#if !data.services.some((s) => s.kind === "valkey")}
+            <button class="btn" disabled={!!busy} onclick={() => run("valkey", () => api.install("valkey"))}
+              title="Redis-compatible; built from verified source; needs Xcode command line tools">
+              {busy === "valkey" ? "Building Valkey (about a minute)…" : "Add Valkey (Redis)"}
+            </button>
+          {/if}
+        </div>
         {#if !data.running && !data.running_elsewhere && data.services.length}
           <p class="empty">Services start together with Corral.</p>
         {/if}

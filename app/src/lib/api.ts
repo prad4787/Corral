@@ -78,6 +78,15 @@ export interface Dump {
   uri: string | null;
 }
 
+export interface WatchEvent {
+  id: number;
+  kind: "query" | "http" | "log" | "view" | "cache" | "job";
+  time: number;
+  request_id: string | null;
+  request: { method?: string | null; host?: string | null; uri?: string | null; command?: string | null };
+  data: Record<string, any>;
+}
+
 export interface LogEntry {
   time: string;
   env: string;
@@ -99,7 +108,7 @@ export const api = {
   setDefaultPhp: (version: string) => invoke<Overview>("set_default_php", { version }),
   start: () => invoke<Overview>("start_engine"),
   stop: () => invoke<Overview>("stop_engine"),
-  install: (what: "web" | "php" | "mysql", version?: string) =>
+  install: (what: "web" | "php" | "mysql" | "valkey" | "postgres", version?: string) =>
     invoke<Overview>("install_component", { what, version }),
   setServiceEnabled: (name: string, enabled: boolean) =>
     invoke<Overview>("set_service_enabled", { name, enabled }),
@@ -123,5 +132,7 @@ export const api = {
     invoke<string>("mail_save_attachment", { id, index }),
   dumpsList: () => invoke<Dump[]>("dumps_list", {}),
   dumpsClear: () => invoke<void>("dumps_clear"),
+  eventsList: () => invoke<WatchEvent[]>("events_list", {}),
+  eventsClear: () => invoke<void>("events_clear"),
   siteLogs: (site: string, level?: string) => invoke<LogEntry[]>("site_logs", { site, level }),
 };

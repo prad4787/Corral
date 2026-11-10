@@ -348,16 +348,11 @@ async fn install_component(
                 cfg.save(&paths).map_err(err)?;
             }
         }
-        "mysql" => {
-            corral_services::add(
-                &paths,
-                corral_services::manifest::Kind::Mysql,
-                version.as_deref(),
-                None,
-                None,
-            )
-            .await
-            .map_err(err)?;
+        "mysql" | "valkey" | "postgres" => {
+            let kind = corral_services::manifest::Kind::parse(&what).ok_or("unknown service")?;
+            corral_services::add(&paths, kind, version.as_deref(), None, None)
+                .await
+                .map_err(err)?;
         }
         other => return Err(format!("unknown component {other:?}")),
     }
@@ -610,6 +605,21 @@ fn dumps_list(state: State<'_, AppState>, limit: Option<usize>) -> Vec<corral_du
 }
 
 #[tauri::command]
+fn events_list(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Vec<corral_dumps::events::Event> {
+    corral_dumps::events::store(&state.paths.root).list(limit.unwrap_or(300))
+}
+
+#[tauri::command]
+fn events_clear(state: State<'_, AppState>) -> CmdResult<()> {
+    corral_dumps::events::store(&state.paths.root)
+        .clear()
+        .map_err(err)
+}
+
+#[tauri::command]
 fn dumps_clear(state: State<'_, AppState>) -> CmdResult<()> {
     corral_dumps::Store::new(corral_dumps::store_file(&state.paths.root))
         .clear()
@@ -838,6 +848,8 @@ pub fn run() {
             mail_save_attachment,
             dumps_list,
             dumps_clear,
+            events_list,
+            events_clear,
             site_logs
         ])
         .build(tauri::generate_context!())
