@@ -11,7 +11,7 @@ set -euo pipefail
 
 PHP_MINOR="${1:-8.4}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d -t corral-spike)"
+WORK="$(mktemp -d -t cs)"
 export CORRAL_HOME="$WORK/home"
 export CORRAL_LOG="${CORRAL_LOG:-warn}"
 CORRAL="$ROOT/target/debug/corral"

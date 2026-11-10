@@ -91,8 +91,8 @@ impl Paths {
     /// Fail early with a clear message instead of cryptic bind errors.
     pub fn check_socket_paths(&self) -> Result<(), String> {
         const MAX: usize = 103;
-        // The longest socket Corral creates (debug pool of a two-digit minor).
-        let longest = self.fpm_debug_socket("10.10");
+        // The longest socket Corral creates (an Xdebug pool; PHP minors are one digit).
+        let longest = self.fpm_debug_socket("9.9");
         let len = longest.as_os_str().len();
         if len > MAX {
             return Err(format!(
