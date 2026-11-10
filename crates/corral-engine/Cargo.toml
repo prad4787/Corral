@@ -15,6 +15,7 @@ corral-supervisor.workspace = true
 corral-fetch.workspace = true
 corral-services.workspace = true
 corral-mail.workspace = true
+corral-dumps.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

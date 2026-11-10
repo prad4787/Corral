@@ -734,6 +734,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "corral-core",
+ "corral-dumps",
  "corral-engine",
  "corral-mail",
  "corral-services",
@@ -757,6 +758,7 @@ dependencies = [
  "clap",
  "corral-core",
  "corral-dns",
+ "corral-dumps",
  "corral-engine",
  "corral-mail",
  "corral-services",
@@ -793,12 +795,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "corral-dumps"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "corral-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "corral-core",
  "corral-dns",
+ "corral-dumps",
  "corral-fetch",
  "corral-mail",
  "corral-proxy",

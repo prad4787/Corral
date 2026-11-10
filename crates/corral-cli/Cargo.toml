@@ -17,6 +17,7 @@ corral-dns.workspace = true
 corral-tls.workspace = true
 corral-services.workspace = true
 corral-mail.workspace = true
+corral-dumps.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

@@ -50,9 +50,24 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
     let versions: Vec<PhpVersion> = installs.iter().map(|i| i.version).collect();
     let default = cfg.default_php.as_deref().and_then(PhpVersion::parse);
 
+    // The prepend file must exist before any ini references it.
+    let prepend = corral_dumps::prepend_path(&paths.root);
+    let prepend = if cfg.dumps {
+        corral_core::fsutil::write_if_changed(
+            &prepend,
+            corral_dumps::prepend_php(&corral_dumps::socket_path(&paths.root)).as_bytes(),
+        )?;
+        corral_core::fsutil::write_if_changed(
+            &corral_dumps::render_path(&paths.root),
+            corral_dumps::render_php().as_bytes(),
+        )?;
+        Some(prepend)
+    } else {
+        None
+    };
     let mut changed_php = Vec::new();
     for inst in &installs {
-        if php::write_configs(paths, inst)? {
+        if php::write_configs(paths, inst, prepend.as_deref())? {
             changed_php.push(inst.version.to_string());
         }
     }
@@ -288,6 +303,25 @@ pub async fn run(
         }
     };
 
+    let dumps = if cfg.dumps {
+        match corral_dumps::bind(&corral_dumps::socket_path(&paths.root)) {
+            Ok(l) => Some(tokio::spawn(corral_dumps::serve(
+                l,
+                corral_dumps::Store::new(corral_dumps::store_file(&paths.root)),
+                corral_dumps::Renderer {
+                    php: paths.bin.join("php"),
+                    script: corral_dumps::render_path(&paths.root),
+                },
+            ))),
+            Err(e) => {
+                tracing::warn!(error = %e, "dump viewer disabled: cannot bind socket");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let sup = Supervisor::new();
     sync_fpm(&paths, &sup, &rendered.fpm_versions).await?;
     sup.start(caddy_spec(&paths)).await?;
@@ -364,6 +398,11 @@ pub async fn run(
     if let Some(m) = mail {
         m.abort();
     }
+    if let Some(d) = dumps {
+        d.abort();
+    }
+    // No socket means the prepend file falls back to normal dump() output.
+    let _ = std::fs::remove_file(corral_dumps::socket_path(&paths.root));
     sup.stop_all().await;
     let _ = std::fs::remove_file(orphans::pid_file(&paths));
     Ok(())

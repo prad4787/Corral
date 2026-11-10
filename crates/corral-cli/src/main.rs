@@ -116,6 +116,28 @@ enum Cmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Show a Laravel site's log (storage/logs), newest first.
+    Logs {
+        /// Site name (default: the site for the current directory).
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+        /// Minimum level: debug, info, notice, warning, error, critical…
+        #[arg(long)]
+        level: Option<String>,
+        /// Include stack traces.
+        #[arg(long)]
+        trace: bool,
+    },
+    /// Show dump()/dd() output captured from PHP, newest first.
+    Dumps {
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
+        /// Delete all captured dumps.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Show mail caught by Corral (SMTP on 127.0.0.1:2525).
     #[command(subcommand)]
     Mail(MailCmd),
@@ -233,7 +255,7 @@ fn set_dotenv_value(file: &std::path::Path, key: &str, value: &str) -> anyhow::R
 enum MailCmd {
     /// List caught messages, newest first.
     List {
-        #[arg(short, long, default_value_t = 20)]
+        #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
     },
     /// Show one message (text body, or HTML if there is no text part).
@@ -540,6 +562,85 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             if !settings.is_empty() {
                 println!("# A running Corral restarts PHP {v} within ~1s.");
+            }
+        }
+        Cmd::Logs {
+            site,
+            limit,
+            level,
+            trace,
+        } => {
+            use corral_core::logs;
+            let name = site_name(&paths, &cfg, site)?;
+            let s = Registry::load(&paths)?
+                .resolve(&cfg)?
+                .into_iter()
+                .find(|x| x.name == name)
+                .with_context(|| format!("no site named {name:?}"))?;
+            let min = match level.as_deref() {
+                Some(l) => {
+                    Some(logs::Level::parse(l).with_context(|| format!("unknown level {l:?}"))?)
+                }
+                None => None,
+            };
+            let file = logs::log_files(&s.path)
+                .into_iter()
+                .next()
+                .with_context(|| format!("no log files in {}/storage/logs", s.path.display()))?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&logs::tail(&file, 4 << 20, limit, min)?)?
+                );
+            } else {
+                println!("# {}", file.display());
+                for e in logs::tail(&file, 4 << 20, limit, min)? {
+                    println!(
+                        "{} {:>9} {}",
+                        e.time,
+                        format!("{:?}", e.level).to_uppercase(),
+                        e.message
+                    );
+                    if trace && !e.details.is_empty() {
+                        println!("{}", e.details);
+                    }
+                }
+            }
+        }
+        Cmd::Dumps { limit, clear } => {
+            let store = corral_dumps::Store::new(corral_dumps::store_file(&paths.root));
+            if clear {
+                store.clear()?;
+                println!("Cleared dumps");
+            } else {
+                let list = store.list(limit);
+                if list.is_empty() {
+                    println!(
+                        "No dumps yet{}.",
+                        if cfg.dumps {
+                            ""
+                        } else {
+                            " (dumps are disabled: set dumps = true)"
+                        }
+                    );
+                }
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&list)?);
+                } else {
+                    for d in list {
+                        let at = match (&d.file, d.line) {
+                            (Some(f), Some(l)) => format!("{f}:{l}"),
+                            (Some(f), None) => f.clone(),
+                            _ => "?".into(),
+                        };
+                        let req = match (&d.method, &d.host, &d.uri) {
+                            (Some(m), Some(h), Some(u)) => format!("{m} {h}{u}"),
+                            _ => d.sapi.clone().unwrap_or_default(),
+                        };
+                        println!("#{} {at}  [{req}]", d.id);
+                        println!("{}", d.text.trim_end());
+                    }
+                }
             }
         }
         Cmd::Mail(cmd) => {
