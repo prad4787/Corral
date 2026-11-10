@@ -83,8 +83,70 @@ enum Cmd {
     Trust,
     /// Check the environment for common problems.
     Doctor,
+    /// Manage databases and other background services.
+    #[command(subcommand)]
+    Service(ServiceCmd),
+    /// Manage databases inside a MySQL service.
+    #[command(subcommand)]
+    Db(DbCmd),
     /// Print where Corral keeps its files.
     Paths,
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// List service instances and the catalog.
+    List,
+    /// Install and add a service instance (e.g. `corral service add mysql`).
+    Add {
+        kind: String,
+        /// Version prefix, e.g. 8.4 (default: newest in the catalog).
+        #[arg(long)]
+        version: Option<String>,
+        /// Instance name (default: the kind, e.g. "mysql").
+        #[arg(long)]
+        name: Option<String>,
+        /// Port on 127.0.0.1 (default: the standard port, or the next free one).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Enable an instance; a running engine starts it within ~1s.
+    Start { name: String },
+    /// Disable an instance; a running engine stops it within ~1s.
+    Stop { name: String },
+    /// Remove an instance. Data is kept unless --delete-data is given.
+    Remove {
+        name: String,
+        #[arg(long)]
+        delete_data: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCmd {
+    /// Create a database. Without NAME, uses DB_DATABASE from ./.env.
+    Create {
+        name: Option<String>,
+        #[arg(long, default_value = "mysql")]
+        service: String,
+    },
+    /// List databases.
+    List {
+        #[arg(long, default_value = "mysql")]
+        service: String,
+    },
+}
+
+/// Read one key from a dotenv file without printing anything else from it.
+fn dotenv_value(file: &std::path::Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    text.lines().find_map(|l| {
+        let l = l.trim();
+        let rest = l.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+        let v = rest.split(" #").next().unwrap_or("").trim();
+        let v = v.trim_matches(|c| c == '"' || c == '\'');
+        (!v.is_empty()).then(|| v.to_string())
+    })
 }
 
 #[derive(Subcommand)]
@@ -382,6 +444,128 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
         }
         Cmd::Doctor => doctor(&paths, &cfg)?,
+        Cmd::Service(ServiceCmd::List) => {
+            use corral_services::store::ServicesFile;
+            let file = ServicesFile::load(&paths)?;
+            if file.instances.is_empty() {
+                println!("No services yet. Try `corral service add mysql`.");
+            }
+            for (name, i) in &file.instances {
+                let up = corral_services::port_in_use(i.port);
+                println!(
+                    "{name:<14} {} {:<8} 127.0.0.1:{:<6} {:<9} {}",
+                    i.kind.label(),
+                    i.version,
+                    i.port,
+                    if i.enabled { "enabled" } else { "disabled" },
+                    if up { "listening" } else { "not running" }
+                );
+            }
+            println!("\nCatalog:");
+            for r in corral_services::manifest::RELEASES {
+                println!(
+                    "  {} {}{}  license: {}",
+                    r.kind.as_str(),
+                    r.version,
+                    if r.artifact().is_some() {
+                        ""
+                    } else {
+                        " (not available for this CPU)"
+                    },
+                    r.kind.license()
+                );
+            }
+        }
+        Cmd::Service(ServiceCmd::Add {
+            kind,
+            version,
+            name,
+            port,
+        }) => {
+            let k = corral_services::manifest::Kind::parse(&kind)
+                .with_context(|| format!("unknown service {kind:?}; see `corral service list`"))?;
+            println!("Installing {} (license: {})…", k.label(), k.license());
+            let (name, inst) =
+                corral_services::add(&paths, k, version.as_deref(), name.as_deref(), port).await?;
+            corral_services::write_shims(
+                &paths,
+                &corral_services::store::ServicesFile::load(&paths)?,
+            )?;
+            println!(
+                "Added {name}: {} {} on 127.0.0.1:{}",
+                k.label(),
+                inst.version,
+                inst.port
+            );
+            println!("It starts with `corral start` (or within ~1s if Corral is already running).");
+            println!(
+                "\nLaravel .env:\n  DB_CONNECTION=mysql\n  DB_HOST=127.0.0.1\n  DB_PORT={}\n  DB_USERNAME=root\n  DB_PASSWORD=",
+                inst.port
+            );
+        }
+        Cmd::Service(ServiceCmd::Start { name }) => {
+            let mut f = corral_services::store::ServicesFile::load(&paths)?;
+            f.set_enabled(&name, true)?;
+            f.save(&paths)?;
+            println!("{name} enabled");
+        }
+        Cmd::Service(ServiceCmd::Stop { name }) => {
+            let mut f = corral_services::store::ServicesFile::load(&paths)?;
+            f.set_enabled(&name, false)?;
+            f.save(&paths)?;
+            println!("{name} disabled");
+        }
+        Cmd::Service(ServiceCmd::Remove { name, delete_data }) => {
+            corral_services::remove(&paths, &name, delete_data)?;
+            if delete_data {
+                println!("Removed {name} and deleted its data");
+            } else {
+                println!(
+                    "Removed {name}; data kept in {}",
+                    corral_services::store::data_dir(&paths, &name).display()
+                );
+            }
+        }
+        Cmd::Db(DbCmd::Create { name, service }) => {
+            let f = corral_services::store::ServicesFile::load(&paths)?;
+            let inst = f.get(&service)?;
+            let db = match name {
+                Some(n) => n,
+                None => dotenv_value(&cwd()?.join(".env"), "DB_DATABASE")
+                    .context("no NAME given and no DB_DATABASE in ./.env")?,
+            };
+            anyhow::ensure!(
+                corral_services::port_in_use(inst.port),
+                "{service} is not running; start Corral first"
+            );
+            corral_services::mysql::create_database(&paths, &service, inst, &db).await?;
+            println!(
+                "Database `{db}` ready on {service} (127.0.0.1:{})",
+                inst.port
+            );
+            // Provision the app's own account from .env (values never printed).
+            let env = cwd()?.join(".env");
+            if let Some(user) = dotenv_value(&env, "DB_USERNAME").filter(|u| u != "root") {
+                let password = dotenv_value(&env, "DB_PASSWORD").unwrap_or_default();
+                corral_services::mysql::ensure_app_user(
+                    &paths, &service, inst, &db, &user, &password,
+                )
+                .await?;
+                println!("Account `{user}` (password from .env) has full access to `{db}`");
+            } else if dotenv_value(&env, "DB_PASSWORD").is_some() {
+                println!(
+                    "note: .env uses root with a password, but Corral's root has none. \
+                     Set DB_PASSWORD= (empty) or use a dedicated DB_USERNAME."
+                );
+            }
+        }
+        Cmd::Db(DbCmd::List { service }) => {
+            let f = corral_services::store::ServicesFile::load(&paths)?;
+            let inst = f.get(&service)?;
+            for db in corral_services::mysql::list_databases(&paths, &service, inst).await? {
+                println!("{db}");
+            }
+        }
         Cmd::Paths => {
             println!("data:   {}", paths.root.display());
             println!("bin:    {}", paths.bin.display());
@@ -465,5 +649,27 @@ async fn main() {
     if let Err(e) = run(Cli::parse()).await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dotenv_value;
+
+    #[test]
+    fn reads_single_dotenv_key() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join(".env");
+        std::fs::write(
+            &f,
+            "APP_KEY=base64:secret\nDB_DATABASE=\"el_billing\" # comment\nDB_DATABASE_TEST=x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            dotenv_value(&f, "DB_DATABASE").as_deref(),
+            Some("el_billing")
+        );
+        assert_eq!(dotenv_value(&f, "DB_DATABASE_TEST").as_deref(), Some("x"));
+        assert_eq!(dotenv_value(&f, "MISSING"), None);
     }
 }
