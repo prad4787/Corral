@@ -180,8 +180,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
         }
         Cmd::Start => {
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut term = signal(SignalKind::terminate())?;
+            let mut hup = signal(SignalKind::hangup())?;
+            let shutdown = async move {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
+                }
+                tracing::info!("shutting down");
             };
             println!(
                 "Corral running: DNS on {}:{}, HTTP {}, HTTPS {}. Press Ctrl-C to stop.",

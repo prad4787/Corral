@@ -6,6 +6,7 @@
 //! whenever `config.toml` or `sites.toml` change.
 
 pub mod install;
+pub mod orphans;
 
 use anyhow::Context;
 use corral_core::paths::Paths;
@@ -142,6 +143,20 @@ fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
         .collect()
 }
 
+/// Wait until a unix socket accepts connections.
+pub async fn wait_for_socket(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::net::UnixStream::connect(path).await.is_ok() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Start FPM pools for `want` and stop pools no longer needed.
 async fn sync_fpm(paths: &Paths, sup: &Supervisor, want: &[String]) -> anyhow::Result<()> {
     let running: Vec<String> = sup
@@ -159,6 +174,10 @@ async fn sync_fpm(paths: &Paths, sup: &Supervisor, want: &[String]) -> anyhow::R
             // A stale socket from a crash would make FPM refuse to start.
             let _ = std::fs::remove_file(paths.fpm_socket(v));
             sup.start(fpm_spec(paths, &inst)).await?;
+            let sock = paths.fpm_socket(v);
+            if !wait_for_socket(&sock, Duration::from_secs(10)).await {
+                tracing::error!(socket = %sock.display(), "PHP-FPM {v} did not become ready; see its log");
+            }
         }
     }
     Ok(())
@@ -173,6 +192,15 @@ pub async fn run(
     let cfg = Config::load(&paths)?;
     if !install::caddy_bin(&paths).exists() {
         anyhow::bail!("web server not installed; run `corral setup` first");
+    }
+
+    let _lock = orphans::EngineLock::acquire(&paths)?;
+    let reaped = orphans::reap(&paths);
+    if !reaped.is_empty() {
+        tracing::warn!(
+            count = reaped.len(),
+            "cleaned up processes left by a previous run"
+        );
     }
 
     let dns_addr = SocketAddr::from((cfg.loopback, cfg.dns_port));
@@ -192,7 +220,23 @@ pub async fn run(
         let sup = sup.clone();
         async move {
             let mut last = mtimes(&paths);
+            let mut last_pids = Vec::new();
             loop {
+                let pids: Vec<u32> = sup
+                    .states()
+                    .await
+                    .into_iter()
+                    .filter_map(|(_, s)| match s {
+                        corral_supervisor::State::Running { pid } => Some(pid),
+                        _ => None,
+                    })
+                    .collect();
+                if pids != last_pids {
+                    if let Err(e) = orphans::record(&paths, &pids) {
+                        tracing::warn!(error = %e, "could not record child pids");
+                    }
+                    last_pids = pids;
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let now = mtimes(&paths);
                 if now == last {
@@ -218,6 +262,7 @@ pub async fn run(
     }
     dns.abort();
     sup.stop_all().await;
+    let _ = std::fs::remove_file(orphans::pid_file(&paths));
     Ok(())
 }
 
@@ -233,6 +278,22 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "#!/bin/sh\n").unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn wait_for_socket_sees_late_listener() {
+        let t = tempfile::tempdir().unwrap();
+        let sock = t.path().join("s.sock");
+        assert!(!wait_for_socket(&sock, Duration::from_millis(100)).await);
+        let s2 = sock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let l = tokio::net::UnixListener::bind(&s2).unwrap();
+            loop {
+                let _ = l.accept().await;
+            }
+        });
+        assert!(wait_for_socket(&sock, Duration::from_secs(3)).await);
     }
 
     #[test]
