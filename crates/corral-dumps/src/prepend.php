@@ -5,6 +5,11 @@
 // Symfony falls back to normal dump() output by itself.
 (static function (): void {
     $sock = '__CORRAL_DUMP_SOCKET__';
+    // Laravel watchers (corral/laravel) send events here; invisible, so also on for CLI.
+    $events = '__CORRAL_EVENTS_SOCKET__';
+    if (file_exists($events)) {
+        $_SERVER['CORRAL_EVENTS_SOCKET'] = $events;
+    }
     if (PHP_SAPI === 'cli' && getenv('CORRAL_DUMPS_CLI') !== '1') {
         return;
     }

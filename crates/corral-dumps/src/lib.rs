@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncBufReadExt;
 
 pub const MAX_DUMPS: usize = 500;
+pub mod events;
 const PREPEND: &str = include_str!("prepend.php");
 const RENDER: &str = include_str!("render.php");
 
@@ -78,12 +79,16 @@ pub struct Dump {
 /// The prepend file for `socket`. Single quotes in the path are escaped for
 /// the PHP string literal.
 pub fn prepend_php(socket: &Path) -> String {
-    let lit = socket
-        .display()
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'");
-    PREPEND.replace("__CORRAL_DUMP_SOCKET__", &lit)
+    let lit = |p: &Path| {
+        p.display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+    };
+    let events = socket.with_file_name("events.sock");
+    PREPEND
+        .replace("__CORRAL_DUMP_SOCKET__", &lit(socket))
+        .replace("__CORRAL_EVENTS_SOCKET__", &lit(&events))
 }
 
 pub fn prepend_path(root: &Path) -> PathBuf {
@@ -96,22 +101,62 @@ pub fn store_file(root: &Path) -> PathBuf {
     root.join("dumps/dumps.jsonl")
 }
 
-#[derive(Clone)]
-pub struct Store {
+/// Something stored in a [`JsonlStore`]: carries a sequential id.
+pub trait Record: Serialize + serde::de::DeserializeOwned {
+    fn id(&self) -> u64;
+    fn set_id(&mut self, id: u64);
+}
+
+impl Record for Dump {
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn set_id(&mut self, id: u64) {
+        self.id = id;
+    }
+}
+
+/// Append-only JSON-lines ring buffer keeping roughly the newest `max`
+/// records (compacted when it reaches twice that, so pushes are O(1) amortized).
+pub struct JsonlStore<T> {
     file: PathBuf,
+    max: usize,
     /// (lines on disk, last id), loaded lazily on first push.
     state: Arc<Mutex<Option<(usize, u64)>>>,
+    _t: std::marker::PhantomData<fn() -> T>,
 }
+
+impl<T> Clone for JsonlStore<T> {
+    fn clone(&self) -> Self {
+        Self {
+            file: self.file.clone(),
+            max: self.max,
+            state: self.state.clone(),
+            _t: std::marker::PhantomData,
+        }
+    }
+}
+
+/// The dump store.
+pub type Store = JsonlStore<Dump>;
 
 impl Store {
     pub fn new(file: impl Into<PathBuf>) -> Self {
+        JsonlStore::with_capacity(file, MAX_DUMPS)
+    }
+}
+
+impl<T: Record> JsonlStore<T> {
+    pub fn with_capacity(file: impl Into<PathBuf>, max: usize) -> Self {
         Self {
             file: file.into(),
+            max,
             state: Arc::new(Mutex::new(None)),
+            _t: std::marker::PhantomData,
         }
     }
 
-    fn read_all(&self) -> Vec<Dump> {
+    fn read_all(&self) -> Vec<T> {
         std::fs::read_to_string(&self.file)
             .unwrap_or_default()
             .lines()
@@ -120,34 +165,32 @@ impl Store {
     }
 
     /// Newest first.
-    pub fn list(&self, limit: usize) -> Vec<Dump> {
+    pub fn list(&self, limit: usize) -> Vec<T> {
         let mut v = self.read_all();
         v.reverse();
         v.truncate(limit);
         v
     }
 
-    /// Append a dump. The file is compacted to the newest [`MAX_DUMPS`] only
-    /// when it reaches twice that, so a push is O(1) amortized.
-    pub fn push(&self, mut d: Dump) -> anyhow::Result<Dump> {
+    pub fn push(&self, mut d: T) -> anyhow::Result<T> {
         let mut st = self.state.lock().unwrap();
         if let Some(dir) = self.file.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let (count, last) = *st.get_or_insert_with(|| {
             let all = self.read_all();
-            (all.len(), all.last().map_or(0, |l| l.id))
+            (all.len(), all.last().map_or(0, Record::id))
         });
-        d.id = last + 1;
+        d.set_id(last + 1);
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.file)?;
         writeln!(f, "{}", serde_json::to_string(&d)?)?;
         let mut count = count + 1;
-        if count >= 2 * MAX_DUMPS {
+        if count >= 2 * self.max {
             let mut all = self.read_all();
-            all.drain(..all.len().saturating_sub(MAX_DUMPS));
+            all.drain(..all.len().saturating_sub(self.max));
             let body: String = all
                 .iter()
                 .filter_map(|x| serde_json::to_string(x).ok())
@@ -156,7 +199,7 @@ impl Store {
             corral_write(&self.file, body.as_bytes())?;
             count = all.len();
         }
-        *st = Some((count, d.id));
+        *st = Some((count, d.id()));
         Ok(d)
     }
 

@@ -138,6 +138,25 @@ enum Cmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Laravel watchers (queries, HTTP calls, logs, views, cache, jobs).
+    /// `enable` adds the corral/laravel package to the project as a --dev
+    /// dependency from Corral's local copy; `disable` removes it again.
+    Watch {
+        /// enable or disable
+        action: String,
+        #[arg(long)]
+        site: Option<String>,
+    },
+    /// Show events from the Laravel watchers, newest first.
+    Events {
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: usize,
+        /// Only one kind: query, http, log, view, cache, job
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Show mail caught by Corral (SMTP on 127.0.0.1:2525).
     #[command(subcommand)]
     Mail(MailCmd),
@@ -639,6 +658,117 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         };
                         println!("#{} {at}  [{req}]", d.id);
                         println!("{}", d.text.trim_end());
+                    }
+                }
+            }
+        }
+        Cmd::Watch { action, site } => {
+            let name = site_name(&paths, &cfg, site)?;
+            let s = Registry::load(&paths)?
+                .resolve(&cfg)?
+                .into_iter()
+                .find(|x| x.name == name)
+                .with_context(|| format!("no site named {name:?}"))?;
+            anyhow::ensure!(
+                s.path.join("artisan").exists(),
+                "{name} is not a Laravel project"
+            );
+            anyhow::ensure!(
+                install::composer_phar(&paths).exists(),
+                "Composer missing: run `corral composer`"
+            );
+            let composer = |args: &[&str]| -> anyhow::Result<()> {
+                let st = std::process::Command::new(paths.bin.join("composer"))
+                    .args(args)
+                    .arg("--no-interaction")
+                    .current_dir(&s.path)
+                    .env(
+                        "PATH",
+                        format!(
+                            "{}:{}",
+                            paths.bin.display(),
+                            std::env::var("PATH").unwrap_or_default()
+                        ),
+                    )
+                    .status()?;
+                anyhow::ensure!(st.success(), "composer {} failed", args.join(" "));
+                Ok(())
+            };
+            match action.as_str() {
+                "enable" => {
+                    let dir = corral_dumps::events::write_laravel_package(&paths.root)?;
+                    let repo = serde_json::json!({
+                        "type": "path",
+                        "url": dir.display().to_string(),
+                        "options": { "symlink": true }
+                    })
+                    .to_string();
+                    composer(&["config", "repositories.corral-laravel", &repo])?;
+                    composer(&["require", "--dev", "corral/laravel:@dev"])?;
+                    println!(
+                        "Watchers enabled for {name}. Events appear in `corral events` and the app while Corral runs."
+                    );
+                }
+                "disable" => {
+                    composer(&["remove", "--dev", "corral/laravel"])?;
+                    composer(&["config", "--unset", "repositories.corral-laravel"])?;
+                    println!("Watchers removed from {name}.");
+                }
+                other => bail!("unknown action {other:?}: use enable or disable"),
+            }
+        }
+        Cmd::Events { limit, kind, clear } => {
+            let store = corral_dumps::events::store(&paths.root);
+            if clear {
+                store.clear()?;
+                println!("Cleared events");
+            } else {
+                let mut list = store.list(if kind.is_some() { 5000 } else { limit });
+                if let Some(k) = &kind {
+                    list.retain(|e| &e.kind == k);
+                    list.truncate(limit);
+                }
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&list)?);
+                } else {
+                    for e in list {
+                        let d = &e.data;
+                        let summary = match e.kind.as_str() {
+                            "query" => format!(
+                                "{:>8.2}ms  {}",
+                                d["time_ms"].as_f64().unwrap_or(0.0),
+                                d["sql"].as_str().unwrap_or("")
+                            ),
+                            "http" => format!(
+                                "{} {} -> {}",
+                                d["method"].as_str().unwrap_or(""),
+                                d["url"].as_str().unwrap_or(""),
+                                d["status"]
+                            ),
+                            "log" => format!(
+                                "{}: {}",
+                                d["level"].as_str().unwrap_or(""),
+                                d["message"].as_str().unwrap_or("")
+                            ),
+                            "view" => d["name"].as_str().unwrap_or("").to_string(),
+                            "cache" => format!(
+                                "{} {}",
+                                d["op"].as_str().unwrap_or(""),
+                                d["key"].as_str().unwrap_or("")
+                            ),
+                            "job" => format!(
+                                "{} {}",
+                                d["name"].as_str().unwrap_or(""),
+                                d["status"].as_str().unwrap_or("")
+                            ),
+                            _ => d.to_string(),
+                        };
+                        println!(
+                            "#{:<5} {:<6} {}",
+                            e.id,
+                            e.kind,
+                            summary.chars().take(200).collect::<String>()
+                        );
                     }
                 }
             }

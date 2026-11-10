@@ -61,6 +61,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
             &corral_dumps::render_path(&paths.root),
             corral_dumps::render_php().as_bytes(),
         )?;
+        corral_dumps::events::write_laravel_package(&paths.root)?;
         Some(prepend)
     } else {
         None
@@ -322,6 +323,21 @@ pub async fn run(
         None
     };
 
+    let events = if cfg.dumps {
+        match corral_dumps::bind(&corral_dumps::events::socket_path(&paths.root)) {
+            Ok(l) => Some(tokio::spawn(corral_dumps::events::serve(
+                l,
+                corral_dumps::events::store(&paths.root),
+            ))),
+            Err(e) => {
+                tracing::warn!(error = %e, "watchers disabled: cannot bind events socket");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let sup = Supervisor::new();
     sync_fpm(&paths, &sup, &rendered.fpm_versions).await?;
     sup.start(caddy_spec(&paths)).await?;
@@ -401,6 +417,10 @@ pub async fn run(
     if let Some(d) = dumps {
         d.abort();
     }
+    if let Some(e) = events {
+        e.abort();
+    }
+    let _ = std::fs::remove_file(corral_dumps::events::socket_path(&paths.root));
     // No socket means the prepend file falls back to normal dump() output.
     let _ = std::fs::remove_file(corral_dumps::socket_path(&paths.root));
     sup.stop_all().await;
