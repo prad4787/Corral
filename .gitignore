@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/target/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Tauri
+src-tauri/gen/
+src-tauri/target/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Local env / secrets
+.env
+.env.*
+*.p12
+*.pem
+!tests/fixtures/**/*.pem
+
+# Downloaded runtimes during dev (never commit third-party binaries)
+/runtimes/
