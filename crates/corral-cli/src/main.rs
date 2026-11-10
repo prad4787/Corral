@@ -1331,6 +1331,11 @@ fn main() {
 
 #[tokio::main]
 async fn real_main() {
+    // Exit quietly when piped into `head` & co. instead of panicking.
+    // SAFETY: restoring the default disposition for SIGPIPE.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("CORRAL_LOG")
