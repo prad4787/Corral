@@ -18,8 +18,8 @@ Rules for every phase:
 | 0.2 CI | ✅ Done | `.github/workflows/ci.yml` (not run yet: no remote) |
 | 0.3 Spike: ports | ✅ Done | Root is needed for `127.0.0.1:80/443`, so we keep fd-passing ([ADR-0003](adr/0003-privileged-helper.md)) |
 | 0.4 Spike: helper | ⏳ Open | Needs a signing identity to test SMAppService |
-| 0.5 Spike: PHP | 🟡 Partial | static-php.dev builds exist but have **no checksums**. Installs need `--allow-unverified` until we host a manifest |
-| 0.6 Spike: Caddy | 🟡 Ready to run | `scripts/spike-e2e.sh` runs the whole flow in a sandbox. It hasn't run in this environment because running downloaded binaries needs your approval |
+| 0.5 Spike: PHP | 🟡 Works, unverified | static-php.dev builds exist but have **no checksums**. Installs need `--allow-unverified` until we host a manifest |
+| 0.6 Spike: Caddy | ✅ Done | `scripts/spike-e2e.sh` 13/13 on macOS 26 |
 | 1.1 Config/state | ✅ Done | TOML for config and sites. SQLite is deferred to mail/dumps (Phase 3) |
 | 1.2 PHP manager | ✅ Done | Discovery, configs, shims, install from static-php.dev |
 | 1.3 Supervisor | ✅ Done | Process groups, backoff, SIGTERM→SIGKILL |
@@ -27,9 +27,9 @@ Rules for every phase:
 | 1.5 TLS | ✅ Done | Name-constrained CA, 397-day leaves |
 | 1.6 Proxy | ✅ Done | Caddy JSON with live `--watch` reload |
 | 1.7 Site registry | ✅ Done | Park, link, isolate, secure, 9 drivers |
-| 1.8 CLI | ✅ Done (direct) | Talks to the files directly. The HTTP API (5.1) is still open |
-| 1.9 UI | 🟡 Partial | Sites, detail, PHP, start/stop. Onboarding, tray and launch-at-login are open |
-| 1.10 Uninstall | ⏳ Open | |
+| 1.8 CLI | ✅ Done | Works on the shared files; `status`, `shell-path`, `composer`, `uninstall` added. HTTP API (5.1) moved to Phase 4 with the MCP server, since nothing needs it before then |
+| 1.9 UI | ✅ Done | Onboarding, Sites/Services/Settings, tray, launch at login, open in editor/terminal |
+| 1.10 Uninstall | ✅ Done | Dry run by default; keeps service data unless `--delete-data`; prints the sudo undo steps |
 | 3.1 MySQL | ✅ Done (pulled forward) | 8.4.11 pinned by SHA-256; `corral service`/`corral db`; validated with a real Laravel 11 app (48 migrations + seeders) |
 
 **Real-machine validation (2026-11-10, macOS 26.6.2 arm64, another local PHP tool running alongside):**
@@ -56,7 +56,7 @@ Goal: prove the three risky parts work before building the UI on top of them.
 
 ## Phase 1: MVP, "sites just work" (target: 4–6 weeks), `v0.1.0`
 
-Features: 1.1–1.3, 1.5–1.8, 1.10–1.15, 1.18, 1.20, 1.21, 2.1, 2.2, 2.9, 5.1.
+Features: 1.1–1.3, 1.5–1.8, 1.10–1.15, 1.18, 1.20, 1.21, 2.1, 2.2, 2.9. (5.1 moved to Phase 4.)
 
 Order:
 
@@ -109,7 +109,7 @@ mail catcher → dumps package + receiver → Xdebug debug pool → log viewer �
 
 ## Phase 4: Release quality (target: 3–4 weeks), `v1.0.0`
 
-Features: 1.19, 2.6, 4.7, 4.9, 5.3.
+Features: 1.19, 2.6, 4.7, 4.9, 5.1 (moved from Phase 1), 5.3.
 
 - Developer ID signing + notarization in CI. Signed updater manifests on GitHub Releases.
 - Homebrew cask.
