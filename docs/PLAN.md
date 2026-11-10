@@ -30,6 +30,7 @@ Rules for every phase:
 | 1.8 CLI | ✅ Done | Works on the shared files; `status`, `shell-path`, `composer`, `uninstall` added. HTTP API (5.1) moved to Phase 4 with the MCP server, since nothing needs it before then |
 | 1.9 UI | ✅ Done | Onboarding, Sites/Services/Settings, tray, launch at login, open in editor/terminal |
 | 1.10 Uninstall | ✅ Done | Dry run by default; keeps service data unless `--delete-data`; prints the sudo undo steps |
+| **Phase 2** | ✅ Done (`v0.2.0`) | Node manager (1.17, SHASUMS256-verified), php.ini overrides with live pool restart (1.4), new-project wizard with starter kits (2.7, 1.16 via `composer create-project`), .env editor (2.3, textarea for now; CodeMirror later), open in editor/terminal (2.4), Tinker (2.5), TLD change (1.9, CLI). **Deferred:** URL scheme (5.2) moves to Phase 4. Extension toggling from 1.4 becomes ini overrides, because static PHP builds compile extensions in |
 | 3.1 MySQL | ✅ Done (pulled forward) | 8.4.11 pinned by SHA-256; `corral service`/`corral db`; validated with a real Laravel 11 app (48 migrations + seeders) |
 
 **Real-machine validation (2026-11-10, macOS 26.6.2 arm64, another local PHP tool running alongside):**
@@ -82,7 +83,7 @@ Order:
 
 ## Phase 2: Daily-driver polish (target: 3–4 weeks), `v0.2.0`
 
-Features: 1.4, 1.9, 1.16, 1.17, 2.3, 2.4, 2.5, 2.7, 5.2.
+Features: 1.4, 1.9, 1.16, 1.17, 2.3, 2.4, 2.5, 2.7. (5.2 moved to Phase 4.)
 
 **Acceptance:**
 
@@ -109,7 +110,7 @@ mail catcher → dumps package + receiver → Xdebug debug pool → log viewer �
 
 ## Phase 4: Release quality (target: 3–4 weeks), `v1.0.0`
 
-Features: 1.19, 2.6, 4.7, 4.9, 5.1 (moved from Phase 1), 5.3.
+Features: 1.19, 2.6, 4.7, 4.9, 5.1 (moved from Phase 1), 5.2 (moved from Phase 2), 5.3.
 
 - Developer ID signing + notarization in CI. Signed updater manifests on GitHub Releases.
 - Homebrew cask.
