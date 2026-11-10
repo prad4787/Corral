@@ -3,6 +3,7 @@
 pub mod config;
 pub mod drivers;
 pub mod fsutil;
+pub mod logs;
 pub mod paths;
 pub mod php;
 pub mod shell;
