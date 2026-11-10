@@ -13,6 +13,17 @@
   let error = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let skipSetup = $state(false);
+  let notice = $state<string | null>(null);
+  // .env editor for the selected site
+  let envText = $state<string | null>(null);
+  let envFor = $state<string | null>(null);
+  // php.ini editor
+  let iniVersion = $state<string | null>(null);
+  let iniText = $state("");
+  // new project form
+  let showNew = $state(false);
+  let newName = $state("");
+  let newKit = $state("none");
 
   const site = $derived(data?.sites.find((s) => s.name === selected) ?? null);
   const filtered = $derived(
@@ -71,6 +82,51 @@
   function selectSite(name: string) {
     selected = name;
     view = "site";
+    envText = null;
+    envFor = null;
+  }
+
+  async function loadEnv(name: string) {
+    await act("env", async () => {
+      envText = (await api.readEnv(name)) ?? "";
+      envFor = name;
+    });
+  }
+
+  async function saveEnv() {
+    if (envFor === null || envText === null) return;
+    const [n, t] = [envFor, envText];
+    await act("saveenv", async () => {
+      await api.writeEnv(n, t);
+      notice = ".env saved (original kept as .env.corral-backup)";
+    });
+  }
+
+  async function editIni(version: string) {
+    await act("ini", async () => {
+      iniText = await api.readPhpIni(version);
+      iniVersion = version;
+    });
+  }
+
+  async function saveIni() {
+    if (!iniVersion) return;
+    const [v, t] = [iniVersion, iniText];
+    await act("saveini", async () => {
+      await api.writePhpIni(v, t);
+      notice = `Saved PHP ${v} overrides; a running Corral restarts that PHP within ~1s.`;
+      iniVersion = null;
+    });
+  }
+
+  async function createProject() {
+    const name = newName.trim();
+    await run("new", () => api.newProject(name, newKit));
+    if (!error) {
+      showNew = false;
+      newName = "";
+      selectSite(name);
+    }
   }
 
   onMount(() => {
@@ -175,15 +231,37 @@
         {/each}
       </nav>
 
+      {#if showNew}
+        <form class="newform" onsubmit={(e) => { e.preventDefault(); createProject(); }}>
+          <input placeholder="project-name" bind:value={newName} aria-label="Project name" />
+          <select bind:value={newKit} aria-label="Starter kit">
+            <option value="none">Laravel (blank)</option>
+            <option value="livewire">Livewire starter kit</option>
+            <option value="react">React starter kit</option>
+            <option value="vue">Vue starter kit</option>
+          </select>
+          <div class="row">
+            <button class="btn primary" type="submit" disabled={!!busy || !newName.trim()}>
+              {busy === "new" ? "Creating…" : "Create"}
+            </button>
+            <button class="btn" type="button" onclick={() => (showNew = false)}>Cancel</button>
+          </div>
+        </form>
+      {/if}
       <footer class="actions">
-        <button class="btn" onclick={addParked} disabled={!!busy}>Park folder…</button>
-        <button class="btn" onclick={linkFolder} disabled={!!busy}>Link project…</button>
+        <button class="btn" onclick={() => (showNew = !showNew)} disabled={!!busy || !data?.parked.length}
+          title={data?.parked.length ? "" : "Park a folder first"}>New…</button>
+        <button class="btn" onclick={addParked} disabled={!!busy}>Park…</button>
+        <button class="btn" onclick={linkFolder} disabled={!!busy}>Link…</button>
       </footer>
     </aside>
 
     <main class="detail">
       {#if error}
         <div class="error" role="alert">{error}</div>
+      {/if}
+      {#if notice}
+        <div class="notice" role="status">{notice} <button class="link" onclick={() => (notice = null)}>Dismiss</button></div>
       {/if}
 
       {#if view === "site" && site}
@@ -194,6 +272,9 @@
           <button class="btn primary" onclick={() => openUrl(site.url)}>Open {site.url}</button>
           <button class="btn" onclick={() => act("editor", () => api.openIn(site.path, "editor"))}>Open in editor</button>
           <button class="btn" onclick={() => act("terminal", () => api.openIn(site.path, "terminal"))}>Terminal</button>
+          {#if site.driver.kind === "laravel" || site.driver.kind === "statamic"}
+            <button class="btn" onclick={() => act("tinker", () => api.openIn(site.path, "tinker"))}>Tinker</button>
+          {/if}
           <button class="btn" onclick={() => revealItemInDir(site.path)}>Finder</button>
           {#if site.origin === "linked"}
             <button class="btn danger" onclick={() => run("unlink", () => api.unlink(site.name))}>Unlink</button>
@@ -233,6 +314,20 @@
             </label>
           </dd>
         </dl>
+
+        <section>
+          <h2>Environment (.env)</h2>
+          {#if envFor === site.name && envText !== null}
+            <textarea class="code" spellcheck="false" bind:value={envText} aria-label=".env contents"></textarea>
+            <div class="buttons">
+              <button class="btn primary" onclick={saveEnv} disabled={!!busy}>Save .env</button>
+              <button class="btn" onclick={() => { envFor = null; envText = null; }}>Close</button>
+            </div>
+          {:else}
+            <p class="empty">Contains secrets, so it stays hidden until you open it.</p>
+            <button class="btn" onclick={() => loadEnv(site.name)} disabled={!!busy}>Show and edit .env</button>
+          {/if}
+        </section>
       {:else if view === "services" && data}
         <h1>Services</h1>
         <p class="sub">Run on 127.0.0.1 only. Data stays in Corral's folder until you remove it.</p>
@@ -290,17 +385,55 @@
             {#each data.php as p (p.version)}
               <li>
                 <span>PHP {p.version}</span>
-                {#if p.is_default}<span class="badge">default</span>{:else}
-                  <button class="btn small" onclick={() => run("defphp", () => api.setDefaultPhp(p.version))}>Make default</button>
-                {/if}
+                <span class="row">
+                  <button class="btn small" onclick={() => editIni(p.version)}>php.ini…</button>
+                  {#if p.is_default}<span class="badge">default</span>{:else}
+                    <button class="btn small" onclick={() => run("defphp", () => api.setDefaultPhp(p.version))}>Make default</button>
+                  {/if}
+                </span>
               </li>
             {/each}
           </ul>
+          {#if iniVersion}
+            <h2>PHP {iniVersion} overrides (90-user.ini)</h2>
+            <textarea class="code" spellcheck="false" bind:value={iniText} aria-label="php.ini overrides"></textarea>
+            <div class="buttons">
+              <button class="btn primary" onclick={saveIni} disabled={!!busy}>Save</button>
+              <button class="btn" onclick={() => (iniVersion = null)}>Cancel</button>
+            </div>
+          {/if}
           <div class="buttons">
             {#each ["8.3", "8.2"] as v (v)}
               {#if !data.php.some((p) => p.version === v)}
                 <button class="btn small" disabled={!!busy} onclick={() => run("php" + v, () => api.install("php", v))}>
                   {busy === "php" + v ? "Installing…" : `Install PHP ${v}`}
+                </button>
+              {/if}
+            {/each}
+          </div>
+        </section>
+        <section>
+          <h2>Node.js</h2>
+          <ul class="list">
+            {#each data.node as n (n.major)}
+              <li>
+                <span>Node {n.version || n.major}</span>
+                {#if n.is_default}<span class="badge">default</span>{:else}
+                  <button class="btn small" onclick={() => run("nodeuse", () => api.nodeUse(n.major))}>Make default</button>
+                {/if}
+              </li>
+            {:else}
+              <p class="empty">No Node versions installed.</p>
+            {/each}
+          </ul>
+          <div class="buttons">
+            <button class="btn small" disabled={!!busy} onclick={() => run("node", () => api.nodeInstall())}>
+              {busy === "node" ? "Installing…" : "Install latest LTS"}
+            </button>
+            {#each [24, 22] as m (m)}
+              {#if !data.node.some((n) => n.major === m)}
+                <button class="btn small" disabled={!!busy} onclick={() => run("node" + m, () => api.nodeInstall(m))}>
+                  {busy === "node" + m ? "Installing…" : `Install Node ${m}`}
                 </button>
               {/if}
             {/each}
@@ -450,6 +583,22 @@
   }
   code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
 
+  .notice {
+    border: 1px solid var(--border); background: var(--panel); padding: 10px 12px;
+    border-radius: 8px; margin-bottom: 16px;
+  }
+  textarea.code {
+    width: 100%; box-sizing: border-box; min-height: 260px; resize: vertical;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.5;
+    padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text);
+  }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .newform { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+  .newform input, .newform select {
+    font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+  }
   .setup { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
   .steps { list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; counter-reset: step; }
   .steps li {

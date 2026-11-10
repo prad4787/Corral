@@ -28,6 +28,7 @@ export interface Service {
 }
 
 export interface Overview {
+  node: { major: number; version: string; is_default: boolean }[];
   sites: Site[];
   php: { version: string; is_default: boolean }[];
   services: Service[];
@@ -63,5 +64,14 @@ export const api = {
     invoke<Overview>("set_service_enabled", { name, enabled }),
   setShellPath: (enabled: boolean) => invoke<Overview>("set_shell_path", { enabled }),
   setAutostart: (enabled: boolean) => invoke<Overview>("set_autostart", { enabled }),
-  openIn: (path: string, target: "editor" | "terminal") => invoke<void>("open_in", { path, target }),
+  openIn: (path: string, target: "editor" | "terminal" | "tinker") =>
+    invoke<void>("open_in", { path, target }),
+  readEnv: (site: string) => invoke<string | null>("read_env", { site }),
+  writeEnv: (site: string, contents: string) => invoke<void>("write_env", { site, contents }),
+  readPhpIni: (version: string) => invoke<string>("read_php_ini", { version }),
+  writePhpIni: (version: string, contents: string) =>
+    invoke<void>("write_php_ini", { version, contents }),
+  nodeInstall: (major?: number) => invoke<Overview>("node_install", { major }),
+  nodeUse: (major: number) => invoke<Overview>("node_use", { major }),
+  newProject: (name: string, kit: string) => invoke<Overview>("new_project", { name, kit }),
 };

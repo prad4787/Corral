@@ -53,7 +53,15 @@ struct ServiceView {
 }
 
 #[derive(Serialize)]
+struct NodeView {
+    major: u32,
+    version: String,
+    is_default: bool,
+}
+
+#[derive(Serialize)]
 struct Overview {
+    node: Vec<NodeView>,
     sites: Vec<SiteView>,
     php: Vec<PhpView>,
     services: Vec<ServiceView>,
@@ -109,7 +117,16 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         })
         .collect();
     let running = state.engine.lock().unwrap().is_some();
+    let node = corral_engine::node::installed(paths)
+        .into_iter()
+        .map(|(major, version)| NodeView {
+            is_default: cfg.default_node == Some(major),
+            major,
+            version,
+        })
+        .collect();
     Ok(Overview {
+        node,
         sites,
         php,
         services,
@@ -388,6 +405,155 @@ fn set_autostart(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> C
     ov!(app, state)
 }
 
+fn site_path(state: &AppState, name: &str) -> CmdResult<std::path::PathBuf> {
+    let cfg = Config::load(&state.paths).map_err(err)?;
+    Registry::load(&state.paths)
+        .map_err(err)?
+        .resolve(&cfg)
+        .map_err(err)?
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| s.path)
+        .ok_or_else(|| format!("no site named {name:?}"))
+}
+
+/// Read a site's `.env` (only for sites Corral manages).
+#[tauri::command]
+fn read_env(state: State<'_, AppState>, site: String) -> CmdResult<Option<String>> {
+    let f = site_path(&state, &site)?.join(".env");
+    match std::fs::read_to_string(&f) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(err(e)),
+    }
+}
+
+/// Save a site's `.env`. The first save keeps `.env.corral-backup`.
+#[tauri::command]
+fn write_env(state: State<'_, AppState>, site: String, contents: String) -> CmdResult<()> {
+    let f = site_path(&state, &site)?.join(".env");
+    let backup = f.with_file_name(".env.corral-backup");
+    if f.exists() && !backup.exists() {
+        std::fs::copy(&f, &backup).map_err(err)?;
+    }
+    corral_core::fsutil::write_atomic(&f, contents.as_bytes()).map_err(err)
+}
+
+#[tauri::command]
+fn read_php_ini(state: State<'_, AppState>, version: String) -> CmdResult<String> {
+    let v = PhpVersion::parse(&version).ok_or("invalid PHP version")?;
+    let inst = php::find(&state.paths, v)
+        .map_err(err)?
+        .ok_or("PHP version not installed")?;
+    Ok(
+        std::fs::read_to_string(php::user_ini(&inst)).unwrap_or_else(|_| {
+            "; Your PHP overrides, e.g.\n; memory_limit = 1G\n; upload_max_filesize = 1G\n".into()
+        }),
+    )
+}
+
+/// Save the version's 90-user.ini; a running engine restarts that pool.
+#[tauri::command]
+fn write_php_ini(state: State<'_, AppState>, version: String, contents: String) -> CmdResult<()> {
+    let v = PhpVersion::parse(&version).ok_or("invalid PHP version")?;
+    let inst = php::find(&state.paths, v)
+        .map_err(err)?
+        .ok_or("PHP version not installed")?;
+    std::fs::create_dir_all(inst.conf_d()).map_err(err)?;
+    corral_core::fsutil::write_atomic(&php::user_ini(&inst), contents.as_bytes()).map_err(err)
+}
+
+#[tauri::command]
+async fn node_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    major: Option<u32>,
+) -> CmdResult<Overview> {
+    let paths = state.paths.clone();
+    let (m, _) = corral_engine::node::install(&paths, major)
+        .await
+        .map_err(err)?;
+    let mut cfg = Config::load(&paths).map_err(err)?;
+    if cfg.default_node.is_none() {
+        cfg.default_node = Some(m);
+        cfg.save(&paths).map_err(err)?;
+    }
+    corral_engine::node::write_shims(&paths, cfg.default_node).map_err(err)?;
+    ov!(app, state)
+}
+
+#[tauri::command]
+fn node_use(app: AppHandle, state: State<'_, AppState>, major: u32) -> CmdResult<Overview> {
+    corral_engine::node::write_shims(&state.paths, Some(major)).map_err(err)?;
+    let mut cfg = Config::load(&state.paths).map_err(err)?;
+    cfg.default_node = Some(major);
+    cfg.save(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+/// Create a Laravel project (optionally from a starter kit) in the first
+/// parked folder via `composer create-project`.
+#[tauri::command]
+async fn new_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    kit: String,
+) -> CmdResult<Overview> {
+    let paths = state.paths.clone();
+    let package = match kit.as_str() {
+        "none" | "" => "laravel/laravel",
+        "react" => "laravel/react-starter-kit",
+        "vue" => "laravel/vue-starter-kit",
+        "livewire" => "laravel/livewire-starter-kit",
+        _ => return Err(format!("unknown kit {kit:?}")),
+    };
+    if corral_core::sites::slugify(&name).as_deref() != Some(name.as_str()) {
+        return Err("Use lowercase letters, digits and '-' for the project name.".into());
+    }
+    let cfg = Config::load(&paths).map_err(err)?;
+    let parent = cfg
+        .parked
+        .first()
+        .cloned()
+        .ok_or("Park a folder first; new projects are created inside it.")?;
+    let dir = parent.join(&name);
+    if dir.exists() {
+        return Err(format!("{} already exists", dir.display()));
+    }
+    if !install::composer_phar(&paths).exists() || !paths.bin.join("php").exists() {
+        return Err("Install the web server (with Composer) and PHP first.".into());
+    }
+    let out = tokio::process::Command::new(paths.bin.join("composer"))
+        .args(["create-project", package])
+        .arg(&dir)
+        .args(["--no-interaction", "--prefer-dist", "--no-ansi"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                paths.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .await
+        .map_err(err)?;
+    if !out.status.success() {
+        let tail: Vec<String> = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .rev()
+            .take(12)
+            .map(str::to_owned)
+            .collect();
+        return Err(format!(
+            "composer create-project failed:\n{}",
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ));
+    }
+    ov!(app, state)
+}
+
 /// Open a project folder in an editor or terminal.
 #[tauri::command]
 fn open_in(path: String, target: String) -> CmdResult<()> {
@@ -420,6 +586,28 @@ fn open_in(path: String, target: String) -> CmdResult<()> {
         ]
         .iter()
         .any(|id| try_bundle(id)),
+        "tinker" => {
+            // A .command file opens in Terminal and runs in the project.
+            let script =
+                std::env::temp_dir().join(format!("corral-tinker-{}.command", std::process::id()));
+            let bin = Paths::discover().map_err(err)?.bin;
+            let body = format!(
+                "#!/bin/sh\ncd \"{}\" || exit 1\nexport PATH=\"{}:$PATH\"\nrm -f \"$0\"\nexec php artisan tinker\n",
+                dir.display(),
+                bin.display()
+            );
+            std::fs::write(&script, body).map_err(err)?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                    .map_err(err)?;
+            }
+            std::process::Command::new("/usr/bin/open")
+                .args(["-b", "com.apple.Terminal"])
+                .arg(&script)
+                .status()
+                .is_ok_and(|s| s.success())
+        }
         other => return Err(format!("unknown target {other:?}")),
     };
     if ok {
@@ -557,7 +745,14 @@ pub fn run() {
             set_service_enabled,
             set_shell_path,
             set_autostart,
-            open_in
+            open_in,
+            read_env,
+            write_env,
+            read_php_ini,
+            write_php_ini,
+            node_install,
+            node_use,
+            new_project
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
