@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-repository = "https://github.com/corral-dev/corral"
+repository = "https://github.com/prad4787/Corral"
 
 [workspace.dependencies]
 corral-core = { path = "crates/corral-core" }
