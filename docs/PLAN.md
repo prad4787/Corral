@@ -10,6 +10,27 @@ Rules for every phase:
 - Whenever the core changes the system (files, keychain, resolver), it ships with an **undo path**, and that undo is tested.
 - No step requires a passwordless sudo rule.
 
+## Status (2026-11-10)
+
+| Task | State | Notes |
+|---|---|---|
+| 0.1 Workspace + app shell | ✅ Done | Cargo workspace with 8 crates, Tauri 2.11 + SvelteKit |
+| 0.2 CI | ✅ Done | `.github/workflows/ci.yml` (not run yet: no remote) |
+| 0.3 Spike: ports | ✅ Done | Root is needed for `127.0.0.1:80/443`, so we keep fd-passing ([ADR-0003](adr/0003-privileged-helper.md)) |
+| 0.4 Spike: helper | ⏳ Open | Needs a signing identity to test SMAppService |
+| 0.5 Spike: PHP | 🟡 Partial | static-php.dev builds exist but have **no checksums**. Installs need `--allow-unverified` until we host a manifest |
+| 0.6 Spike: Caddy | 🟡 Ready to run | `scripts/spike-e2e.sh` runs the whole flow in a sandbox. It hasn't run in this environment because running downloaded binaries needs your approval |
+| 1.1 Config/state | ✅ Done | TOML for config and sites. SQLite is deferred to mail/dumps (Phase 3) |
+| 1.2 PHP manager | ✅ Done | Discovery, configs, shims, install from static-php.dev |
+| 1.3 Supervisor | ✅ Done | Process groups, backoff, SIGTERM→SIGKILL |
+| 1.4 DNS | ✅ Done | Own resolver. `/etc/resolver` is written by hand with `corral trust` until the helper exists |
+| 1.5 TLS | ✅ Done | Name-constrained CA, 397-day leaves |
+| 1.6 Proxy | ✅ Done | Caddy JSON with live `--watch` reload |
+| 1.7 Site registry | ✅ Done | Park, link, isolate, secure, 9 drivers |
+| 1.8 CLI | ✅ Done (direct) | Talks to the files directly. The HTTP API (5.1) is still open |
+| 1.9 UI | 🟡 Partial | Sites, detail, PHP, start/stop. Onboarding, tray and launch-at-login are open |
+| 1.10 Uninstall | ⏳ Open | |
+
 ---
 
 ## Phase 0: Foundations and risk spikes (target: 1–2 weeks)

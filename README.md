@@ -10,7 +10,41 @@ a dump viewer, Xdebug, and a log viewer. **Every feature is free.** There is no
 
 ## Status
 
-Planning. See:
+Early development (Phase 1). The CLI works today in **high-port mode**
+(sites on `:18080`/`:18443`, no privileged helper yet).
+
+```sh
+cargo build -p corral-cli
+alias corral=./target/debug/corral
+
+corral setup --high-ports                 # downloads Caddy (checksum-verified)
+corral php install 8.4 --allow-unverified # static-php.dev publishes no checksums yet
+corral park ~/Sites                       # every folder becomes <folder>.test
+corral trust                              # prints the one-time sudo commands for DNS + HTTPS
+corral start                              # runs DNS, PHP-FPM and Caddy
+```
+
+Other commands: `link`, `isolate 8.3`, `secure`/`unsecure`, `use 8.4`, `tld`, `doctor`.
+Desktop app: `pnpm -C app install && pnpm -C app tauri dev`.
+
+To try the whole flow without touching your system, run `scripts/spike-e2e.sh`.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `crates/corral-core` | Paths, config, site registry, framework drivers, PHP layout |
+| `crates/corral-dns` | Wildcard resolver for the local TLD |
+| `crates/corral-tls` | Name-constrained local CA + per-site certificates |
+| `crates/corral-proxy` | Caddy JSON generation |
+| `crates/corral-supervisor` | Child-process supervision |
+| `crates/corral-engine` | Ties it all together; runtime downloads |
+| `crates/corral-cli` | The `corral` binary |
+| `app/` | Tauri 2 + Svelte desktop app |
+
+## Docs
+
+See:
 
 - [docs/FEATURES.md](docs/FEATURES.md): the full feature list and how each feature will be built
 - [docs/PLAN.md](docs/PLAN.md): phased roadmap with acceptance criteria

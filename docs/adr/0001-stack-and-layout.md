@@ -40,6 +40,15 @@ corral/
 The UI never touches the system directly. It calls Tauri commands that go
 through `corral-core`, which is the same code path the CLI uses (through `corral-api`).
 
+### Amendment (2026-11-10)
+
+- Added **`corral-engine`**. It renders configs, runs DNS, FPM and Caddy, and
+  downloads runtimes. Both the CLI and the app use it.
+- `corral-api`, `corral-mail`, `corral-dumps` and `corral-helper*` will be created when
+  their phase starts. No empty placeholder crates.
+- Config and the site registry use **TOML** files (`config.toml`, `sites.toml`),
+  which are easy to read and diff. SQLite is kept for high-volume data (mail, dumps).
+
 ## Consequences
 
 - One language for every native part, and one test suite.
