@@ -1,0 +1,105 @@
+# Builds Corral's PHP runtimes (CLI + FPM + Xdebug) for macOS with
+# static-php-cli, then publishes them with a SHA-256 manifest that
+# `corral php install <ver> --manifest <url>` verifies.
+#
+# Status: written but not yet run (needs the GitHub repository). The
+# static-php-cli flags follow its documented CLI; adjust if a release changes them.
+name: PHP builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish (e.g. php-2026.11.10)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Extensions compiled into php / php-fpm. Xdebug is built as a shared
+  # extension so it is only loaded by Corral's debug pool.
+  EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,intl,mbstring,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,redis,session,simplexml,soap,sockets,sqlite3,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
+  SHARED: "xdebug"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.3", "8.4", "8.5"]
+        target:
+          - { runner: macos-15, arch: arm64, spc: spc-macos-aarch64 }
+          - { runner: macos-15-intel, arch: x86_64, spc: spc-macos-x86_64 }
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - name: Fetch static-php-cli
+        run: |
+          curl -fsSL -o spc "https://dl.static-php.dev/static-php-cli/spc-bin/nightly/${{ matrix.target.spc }}"
+          chmod +x spc
+          ./spc --version
+      - name: Doctor
+        run: ./spc doctor --auto-fix
+      - name: Download sources
+        run: ./spc download --with-php=${{ matrix.php }} --for-extensions="$EXTENSIONS,$SHARED" --prefer-pre-built
+      - name: Build
+        run: ./spc build "$EXTENSIONS" --build-cli --build-fpm --build-shared="$SHARED"
+      - name: Smoke test
+        run: |
+          buildroot/bin/php -v
+          buildroot/bin/php -d zend_extension="$PWD/buildroot/modules/xdebug.so" -v | grep -i xdebug
+          buildroot/bin/php-fpm -v
+      - name: Package
+        id: pkg
+        run: |
+          V=$(buildroot/bin/php -r 'echo PHP_VERSION;')
+          A=${{ matrix.target.arch }}
+          mkdir -p out
+          tar -C buildroot/bin -czf "out/php-$V-cli-macos-$A.tar.gz" php
+          tar -C buildroot/bin -czf "out/php-$V-fpm-macos-$A.tar.gz" php-fpm
+          tar -C buildroot/modules -czf "out/php-$V-xdebug-macos-$A.tar.gz" xdebug.so
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ steps.pkg.outputs.version }}-${{ matrix.target.arch }}
+          path: out/*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write manifest
+        env:
+          TAG: ${{ inputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import glob, hashlib, json, os, re
+          tag, repo = os.environ["TAG"], os.environ["REPO"]
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+          builds = {}
+          for path in sorted(glob.glob("dist/*.tar.gz")):
+              name = os.path.basename(path)
+              m = re.match(r"php-(\d+\.\d+\.\d+)-(cli|fpm|xdebug)-macos-(arm64|x86_64)\.tar\.gz$", name)
+              if not m:
+                  continue
+              ver, part, arch = m.groups()
+              digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+              b = builds.setdefault((ver, arch), {"version": ver, "arch": arch})
+              b[part] = {"url": f"{base}/{name}", "sha256": digest}
+          manifest = {"schema": 1, "php": [b for b in builds.values() if "cli" in b and "fpm" in b]}
+          json.dump(manifest, open("dist/php-manifest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.release_tag }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "PHP builds ${{ inputs.release_tag }}" \
+            --notes "PHP CLI, FPM and Xdebug for macOS. Install with: corral php install <version> --manifest https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/php-manifest.json"

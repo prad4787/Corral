@@ -316,6 +316,10 @@ enum PhpCmd {
         /// Install without checksum verification (upstream publishes none yet).
         #[arg(long)]
         allow_unverified: bool,
+        /// Corral build manifest (https URL or file) with SHA-256 for every
+        /// artifact; includes Xdebug when the build has it.
+        #[arg(long)]
+        manifest: Option<String>,
     },
     /// Remove an installed version.
     Remove { version: String },
@@ -550,11 +554,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Php(PhpCmd::Install {
             version,
             allow_unverified,
+            manifest,
         }) => {
             let v = parse_php(&version)?;
-            let full = install::latest_static_php(v).await?;
-            let src = install::PhpSource::static_php(&full);
-            install::install_php(&paths, v, &src, allow_unverified).await?;
+            let full = if let Some(src) = manifest.as_deref() {
+                let m = install::load_manifest(src).await?;
+                let b = m
+                    .pick(v)
+                    .with_context(|| format!("manifest has no PHP {v} build for this Mac"))?
+                    .clone();
+                install::install_php_from_manifest(&paths, &b).await?;
+                println!(
+                    "Verified all artifacts{}",
+                    if b.xdebug.is_some() {
+                        " (including Xdebug)"
+                    } else {
+                        ""
+                    }
+                );
+                b.version
+            } else {
+                let full = install::latest_static_php(v).await?;
+                let src = install::PhpSource::static_php(&full);
+                install::install_php(&paths, v, &src, allow_unverified).await?;
+                full
+            };
             if cfg.default_php.is_none() {
                 cfg.default_php = Some(v.to_string());
                 cfg.save(&paths)?;

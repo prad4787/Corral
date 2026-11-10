@@ -101,6 +101,113 @@ pub fn write_composer_shim(paths: &Paths) -> std::io::Result<()> {
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
 }
 
+/// One file in a PHP build manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ManifestFile {
+    pub url: String,
+    pub sha256: String,
+}
+
+/// A PHP build for one version and CPU.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ManifestBuild {
+    /// Full version, e.g. `8.4.23`.
+    pub version: String,
+    /// `arm64` or `x86_64`.
+    pub arch: String,
+    pub cli: ManifestFile,
+    pub fpm: ManifestFile,
+    /// tar.gz containing `xdebug.so` built for this exact PHP.
+    #[serde(default)]
+    pub xdebug: Option<ManifestFile>,
+}
+
+/// Corral's PHP build manifest (published next to the CI-built archives).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Manifest {
+    pub schema: u32,
+    pub php: Vec<ManifestBuild>,
+}
+
+impl Manifest {
+    pub fn parse(json: &str) -> anyhow::Result<Self> {
+        let m: Manifest = serde_json::from_str(json)?;
+        anyhow::ensure!(m.schema == 1, "unsupported manifest schema {}", m.schema);
+        for b in &m.php {
+            for f in [Some(&b.cli), Some(&b.fpm), b.xdebug.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                anyhow::ensure!(
+                    f.url.starts_with("https://") && f.sha256.len() == 64,
+                    "manifest entry for {} has an insecure URL or bad digest",
+                    b.version
+                );
+            }
+        }
+        Ok(m)
+    }
+
+    /// Newest build of `minor` for this CPU.
+    pub fn pick(&self, minor: PhpVersion) -> Option<&ManifestBuild> {
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let key = |v: &str| -> Vec<u32> { v.split('.').filter_map(|p| p.parse().ok()).collect() };
+        self.php
+            .iter()
+            .filter(|b| b.arch == arch && PhpVersion::parse(&b.version) == Some(minor))
+            .max_by(|a, b| key(&a.version).cmp(&key(&b.version)))
+    }
+}
+
+/// Load a manifest from an https URL or a local file.
+pub async fn load_manifest(src: &str) -> anyhow::Result<Manifest> {
+    let body = if src.starts_with("https://") {
+        client()?
+            .get(src)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?
+    } else if src.starts_with("http://") {
+        bail!("refusing to load a PHP manifest over plain http");
+    } else {
+        std::fs::read_to_string(src).with_context(|| format!("read {src}"))?
+    };
+    Manifest::parse(&body)
+}
+
+/// Install a manifest build (all files checksum-verified), including
+/// xdebug.so when the build ships one.
+pub async fn install_php_from_manifest(
+    paths: &Paths,
+    b: &ManifestBuild,
+) -> anyhow::Result<PathBuf> {
+    let v = PhpVersion::parse(&b.version).context("bad version in manifest")?;
+    let src = PhpSource {
+        cli_url: b.cli.url.clone(),
+        fpm_url: b.fpm.url.clone(),
+        cli_sha256: Some(b.cli.sha256.clone()),
+        fpm_sha256: Some(b.fpm.sha256.clone()),
+    };
+    let dir = install_php(paths, v, &src, false).await?;
+    if let Some(x) = &b.xdebug {
+        let exp = Expected {
+            algo: Hash::Sha256,
+            hex: x.sha256.clone(),
+        };
+        let archive =
+            corral_fetch::fetch_verified(&x.url, &paths.downloads_dir(), Some(&exp)).await?;
+        extract_entry(&archive, "xdebug.so", &dir.join("lib/xdebug.so"))?;
+        std::fs::remove_file(&archive).ok();
+    }
+    Ok(dir)
+}
+
 /// Where a PHP build comes from.
 #[derive(Debug, Clone)]
 pub struct PhpSource {
@@ -197,6 +304,37 @@ pub async fn install_php(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_parse_validate_and_pick() {
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let f = |n: &str| {
+            format!(
+                r#"{{"url":"https://example.test/{n}","sha256":"{}"}}"#,
+                "a".repeat(64)
+            )
+        };
+        let json = format!(
+            r#"{{"schema":1,"php":[
+              {{"version":"8.4.9","arch":"{arch}","cli":{c},"fpm":{c}}},
+              {{"version":"8.4.23","arch":"{arch}","cli":{c},"fpm":{c},"xdebug":{c}}},
+              {{"version":"8.4.99","arch":"other","cli":{c},"fpm":{c}}}
+            ]}}"#,
+            c = f("x.tar.gz")
+        );
+        let m = Manifest::parse(&json).unwrap();
+        let b = m.pick(PhpVersion::parse("8.4").unwrap()).unwrap();
+        assert_eq!(b.version, "8.4.23");
+        assert!(b.xdebug.is_some());
+        assert!(m.pick(PhpVersion::parse("8.3").unwrap()).is_none());
+        let insecure = json.replace("https://", "http://");
+        assert!(Manifest::parse(&insecure).is_err());
+        assert!(Manifest::parse(r#"{"schema":2,"php":[]}"#).is_err());
+    }
 
     #[test]
     fn finds_newest_patch() {
