@@ -17,6 +17,8 @@ corral-tls = { path = "crates/corral-tls" }
 corral-proxy = { path = "crates/corral-proxy" }
 corral-supervisor = { path = "crates/corral-supervisor" }
 corral-engine = { path = "crates/corral-engine" }
+corral-fetch = { path = "crates/corral-fetch" }
+
 
 anyhow = "1"
 thiserror = "2"

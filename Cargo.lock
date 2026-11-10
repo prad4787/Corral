@@ -783,16 +783,27 @@ dependencies = [
  "anyhow",
  "corral-core",
  "corral-dns",
+ "corral-fetch",
  "corral-proxy",
  "corral-supervisor",
  "corral-tls",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "corral-fetch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "flate2",
  "futures-util",
  "hex",
- "libc",
  "reqwest",
- "serde",
- "serde_json",
  "sha2",
  "tar",
  "tempfile",

@@ -1,32 +1,12 @@
-//! Downloading runtimes (Caddy, PHP) with integrity verification.
-//!
-//! Every artifact is downloaded to `downloads/`, hashed while streaming, and
-//! verified **before** anything is extracted. Archives are never extracted
-//! wholesale: only the named entry is read, which rules out path traversal.
+//! Runtime installers (Caddy, PHP). Download/verify/extract live in `corral-fetch`.
 
 use anyhow::{Context, bail};
 use corral_core::paths::Paths;
 use corral_core::php::PhpVersion;
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256, Sha512};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+pub use corral_fetch::{Expected, Hash, client, download, extract_entry, find_checksum, verify};
+use std::path::PathBuf;
 
 pub const CADDY_VERSION: &str = "2.11.9";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hash {
-    Sha256,
-    Sha512,
-}
-
-/// Expected digest of an artifact. `None` is only allowed with an explicit opt-in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expected {
-    pub algo: Hash,
-    pub hex: String,
-}
 
 pub fn arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
@@ -42,93 +22,6 @@ pub fn tools_dir(paths: &Paths) -> PathBuf {
 
 pub fn caddy_bin(paths: &Paths) -> PathBuf {
     tools_dir(paths).join("caddy")
-}
-
-fn client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent(concat!("corral/", env!("CARGO_PKG_VERSION")))
-        .build()?)
-}
-
-/// Stream `url` to `dest`, returning (sha256, sha512) hex digests.
-async fn download(url: &str, dest: &Path) -> anyhow::Result<(String, String)> {
-    tracing::info!(%url, "downloading");
-    let resp = client()?
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?;
-    if let Some(dir) = dest.parent() {
-        tokio::fs::create_dir_all(dir).await?;
-    }
-    let part = dest.with_extension("part");
-    let mut file = tokio::fs::File::create(&part).await?;
-    let (mut h256, mut h512) = (Sha256::new(), Sha512::new());
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        h256.update(&chunk);
-        h512.update(&chunk);
-        file.write_all(&chunk).await?;
-    }
-    file.sync_all().await?;
-    tokio::fs::rename(&part, dest).await?;
-    Ok((hex::encode(h256.finalize()), hex::encode(h512.finalize())))
-}
-
-pub fn verify(actual: (&str, &str), expected: Option<&Expected>, url: &str) -> anyhow::Result<()> {
-    match expected {
-        Some(e) => {
-            let got = match e.algo {
-                Hash::Sha256 => actual.0,
-                Hash::Sha512 => actual.1,
-            };
-            if !got.eq_ignore_ascii_case(e.hex.trim()) {
-                bail!("checksum mismatch for {url}: expected {}, got {got}", e.hex);
-            }
-            Ok(())
-        }
-        None => {
-            tracing::warn!(%url, sha256 = actual.0, "installed WITHOUT checksum verification");
-            Ok(())
-        }
-    }
-}
-
-/// Extract the single regular-file entry named `entry` (basename match) from a
-/// `.tar.gz` into `dest` with mode 0755.
-pub fn extract_entry(archive: &Path, entry: &str, dest: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let gz = flate2::read::GzDecoder::new(std::fs::File::open(archive)?);
-    let mut ar = tar::Archive::new(gz);
-    for e in ar.entries()? {
-        let mut e = e?;
-        let is_file = e.header().entry_type().is_file();
-        let path = e.path()?.into_owned();
-        if is_file && path.file_name().and_then(|n| n.to_str()) == Some(entry) {
-            if let Some(dir) = dest.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let tmp = dest.with_extension("extracting");
-            let mut buf = Vec::new();
-            e.read_to_end(&mut buf)?;
-            std::fs::write(&tmp, &buf)?;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-            std::fs::rename(&tmp, dest)?;
-            return Ok(());
-        }
-    }
-    bail!("{} does not contain {entry}", archive.display())
-}
-
-/// Parse a `checksums.txt` (`<hex>  <filename>` per line) and find `file`.
-pub fn find_checksum(checksums: &str, file: &str) -> Option<String> {
-    checksums.lines().find_map(|l| {
-        let mut it = l.split_whitespace();
-        let (h, f) = (it.next()?, it.next()?);
-        (f.trim_start_matches('*') == file).then(|| h.to_string())
-    })
 }
 
 /// Install Caddy from the official GitHub release, verified against the
@@ -255,61 +148,6 @@ pub async fn install_php(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tarball(dir: &Path, entries: &[(&str, &[u8])]) -> PathBuf {
-        let p = dir.join("a.tar.gz");
-        let gz = flate2::write::GzEncoder::new(
-            std::fs::File::create(&p).unwrap(),
-            flate2::Compression::fast(),
-        );
-        let mut b = tar::Builder::new(gz);
-        for (name, data) in entries {
-            let mut h = tar::Header::new_gnu();
-            h.set_size(data.len() as u64);
-            h.set_mode(0o644);
-            h.set_cksum();
-            b.append_data(&mut h, name, *data).unwrap();
-        }
-        b.into_inner().unwrap().finish().unwrap();
-        p
-    }
-
-    #[test]
-    fn extracts_only_named_entry() {
-        use std::os::unix::fs::PermissionsExt;
-        let t = tempfile::tempdir().unwrap();
-        let a = tarball(t.path(), &[("LICENSE", b"x"), ("pkg/caddy", b"BIN")]);
-        let dest = t.path().join("out/caddy");
-        extract_entry(&a, "caddy", &dest).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), b"BIN");
-        assert_eq!(
-            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert!(!t.path().join("out/LICENSE").exists());
-        assert!(extract_entry(&a, "php", &t.path().join("php")).is_err());
-    }
-
-    #[test]
-    fn checksum_lookup_and_verify() {
-        let sums = "aa11  caddy_2_mac_arm64.tar.gz\nbb22 *caddy_2_linux.tar.gz\n";
-        assert_eq!(
-            find_checksum(sums, "caddy_2_mac_arm64.tar.gz").as_deref(),
-            Some("aa11")
-        );
-        assert_eq!(
-            find_checksum(sums, "caddy_2_linux.tar.gz").as_deref(),
-            Some("bb22")
-        );
-        assert_eq!(find_checksum(sums, "nope"), None);
-        let e = Expected {
-            algo: Hash::Sha512,
-            hex: "ABCD".into(),
-        };
-        assert!(verify(("x", "abcd"), Some(&e), "u").is_ok());
-        assert!(verify(("abcd", "ffff"), Some(&e), "u").is_err());
-        assert!(verify(("x", "y"), None, "u").is_ok());
-    }
 
     #[test]
     fn finds_newest_patch() {
