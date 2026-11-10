@@ -1,156 +1,273 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { api, type Overview } from "$lib/api";
 
-  let name = $state("");
-  let greetMsg = $state("");
+  let data = $state<Overview | null>(null);
+  let selected = $state<string | null>(null);
+  let query = $state("");
+  let error = $state<string | null>(null);
+  let busy = $state(false);
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  const site = $derived(data?.sites.find((s) => s.name === selected) ?? null);
+  const filtered = $derived(
+    (data?.sites ?? []).filter((s) => s.host.includes(query.toLowerCase().trim())),
+  );
+
+  async function run(op: () => Promise<Overview>) {
+    busy = true;
+    error = null;
+    try {
+      data = await op();
+      if (selected && !data.sites.some((s) => s.name === selected)) selected = null;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
   }
+
+  async function pickDir(): Promise<string | null> {
+    const dir = await openDialog({ directory: true, multiple: false });
+    return typeof dir === "string" ? dir : null;
+  }
+
+  async function addParked() {
+    const dir = await pickDir();
+    if (dir) await run(() => api.park(dir));
+  }
+
+  async function linkFolder() {
+    const dir = await pickDir();
+    if (dir) await run(() => api.link(dir));
+  }
+
+  onMount(() => {
+    run(api.overview);
+    // Pick up changes made from the CLI.
+    const t = setInterval(() => !busy && api.overview().then((d) => (data = d)).catch(() => {}), 3000);
+    return () => clearInterval(t);
+  });
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<div class="shell">
+  <aside class="sidebar">
+    <header class="brand">
+      <span class="dot" class:on={data?.running}></span>
+      <strong>Corral</strong>
+      <button
+        class="btn small"
+        disabled={busy || !data?.caddy_installed}
+        title={data?.caddy_installed ? "" : "Run `corral setup` first"}
+        onclick={() => run(data?.running ? api.stop : api.start)}
+      >
+        {data?.running ? "Stop" : "Start"}
+      </button>
+    </header>
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
+    <input class="search" placeholder="Search sites" bind:value={query} aria-label="Search sites" />
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
+    <nav class="sites" aria-label="Sites">
+      {#each filtered as s (s.name)}
+        <button class="site-row" class:active={s.name === selected} onclick={() => (selected = s.name)}>
+          <span class="host">{s.host}</span>
+          <span class="meta">{s.driver_label} · PHP {s.php ?? "–"}</span>
+        </button>
+      {:else}
+        <p class="empty">{data ? "No sites yet." : "Loading…"}</p>
+      {/each}
+    </nav>
+
+    <footer class="actions">
+      <button class="btn" onclick={addParked} disabled={busy}>Park folder…</button>
+      <button class="btn" onclick={linkFolder} disabled={busy}>Link project…</button>
+    </footer>
+  </aside>
+
+  <main class="detail">
+    {#if error}
+      <div class="error" role="alert">{error}</div>
+    {/if}
+
+    {#if site}
+      <h1>{site.host}</h1>
+      <p class="sub">{site.driver_label} · {site.origin === "linked" ? "Linked" : "Parked"}</p>
+
+      <div class="buttons">
+        <button class="btn primary" onclick={() => openUrl(site.url)}>Open {site.url}</button>
+        <button class="btn" onclick={() => revealItemInDir(site.path)}>Show in Finder</button>
+        {#if site.origin === "linked"}
+          <button class="btn danger" onclick={() => run(() => api.unlink(site.name))}>Unlink</button>
+        {/if}
+      </div>
+
+      <dl class="grid">
+        <dt>Path</dt>
+        <dd class="mono">{site.path}</dd>
+        <dt>Document root</dt>
+        <dd class="mono">{site.driver.docroot}</dd>
+        <dt>PHP</dt>
+        <dd>
+          <select
+            value={site.isolated ? site.php : ""}
+            onchange={(e) => run(() => api.setSitePhp(site.name, e.currentTarget.value || null))}
+            aria-label="PHP version for this site"
+          >
+            <option value="">Default ({data?.default_php ?? "none"})</option>
+            {#each data?.php ?? [] as p (p.version)}
+              <option value={p.version}>PHP {p.version}</option>
+            {/each}
+            {#if site.isolated && site.php && !data?.php.some((p) => p.version === site.php)}
+              <option value={site.php}>PHP {site.php} (not installed)</option>
+            {/if}
+          </select>
+        </dd>
+        <dt>HTTPS</dt>
+        <dd>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={site.secure}
+              onchange={(e) => run(() => api.setSiteSecure(site.name, e.currentTarget.checked))}
+            />
+            {site.secure ? "Enabled" : "Disabled"}
+          </label>
+        </dd>
+      </dl>
+    {:else if data}
+      <h1>Overview</h1>
+      <p class="sub">{data.sites.length} sites on .{data.tld}</p>
+
+      <section>
+        <h2>PHP versions</h2>
+        {#if data.php.length === 0}
+          <p class="empty">None installed. Run <code>corral php install 8.4</code>.</p>
+        {/if}
+        <ul class="list">
+          {#each data.php as p (p.version)}
+            <li>
+              <span>PHP {p.version}</span>
+              {#if p.is_default}
+                <span class="badge">default</span>
+              {:else}
+                <button class="btn small" onclick={() => run(() => api.setDefaultPhp(p.version))}>
+                  Make default
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+
+      <section>
+        <h2>Parked folders</h2>
+        <ul class="list">
+          {#each data.parked as dir (dir)}
+            <li>
+              <span class="mono">{dir}</span>
+              <button class="btn small" onclick={() => run(() => api.unpark(dir))}>Remove</button>
+            </li>
+          {:else}
+            <p class="empty">No parked folders.</p>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+  </main>
+</div>
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  :global(:root) {
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --text: #1d1d1b;
+    --muted: #6b6b66;
+    --border: #e2e2dd;
+    --accent: #2f6f4f;
+    --accent-text: #ffffff;
+    --danger: #b3261e;
+    --hover: #efefeb;
+    --ok: #2e9d5b;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
   }
-
-  a:hover {
-    color: #24c8db;
+  @media (prefers-color-scheme: dark) {
+    :global(:root) {
+      --bg: #1b1c1a;
+      --panel: #232421;
+      --text: #ecece8;
+      --muted: #9a9a93;
+      --border: #34352f;
+      --accent: #5fb38a;
+      --accent-text: #0f1a14;
+      --danger: #f08b84;
+      --hover: #2c2d29;
+    }
   }
+  :global(body) { margin: 0; background: var(--bg); }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .shell { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+  .sidebar {
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    border-right: 1px solid var(--border); background: var(--panel); min-height: 0;
   }
-  button:active {
-    background-color: #0f0f0f69;
+  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
+  .brand strong { flex: 1; font-size: 15px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .dot.on { background: var(--ok); }
+  .search {
+    padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit;
   }
-}
+  .sites { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .site-row {
+    text-align: left; border: 0; background: none; color: inherit; font: inherit;
+    padding: 7px 8px; border-radius: 6px; display: flex; flex-direction: column; cursor: default;
+  }
+  .site-row:hover { background: var(--hover); }
+  .site-row.active { background: var(--accent); color: var(--accent-text); }
+  .site-row.active .meta { color: inherit; opacity: 0.8; }
+  .host { font-weight: 500; }
+  .meta { font-size: 12px; color: var(--muted); }
+  .actions { display: flex; gap: 6px; }
+  .actions .btn { flex: 1; }
 
+  .detail { padding: 28px 32px; overflow-y: auto; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 28px 0 8px; }
+  .sub { margin: 4px 0 20px; color: var(--muted); }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: 140px 1fr; gap: 12px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; min-width: 0; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; word-break: break-all; }
+
+  .btn {
+    font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); cursor: default;
+  }
+  .btn:hover:not(:disabled) { background: var(--hover); }
+  .btn:disabled { opacity: 0.5; }
+  .btn.small { padding: 3px 9px; font-size: 12px; }
+  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .btn.danger { color: var(--danger); }
+  select { font: inherit; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  .toggle { display: inline-flex; gap: 8px; align-items: center; }
+
+  .list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .list li {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--hover); color: var(--muted); }
+  .empty { color: var(--muted); }
+  .error {
+    border: 1px solid var(--danger); color: var(--danger); padding: 10px 12px;
+    border-radius: 8px; margin-bottom: 16px;
+  }
+  code { font-family: ui-monospace, Menlo, monospace; }
 </style>
