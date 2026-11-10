@@ -5,6 +5,7 @@
 
 pub mod manifest;
 pub mod mysql;
+pub mod postgres;
 pub mod store;
 pub mod valkey;
 
@@ -60,7 +61,9 @@ pub async fn install(paths: &Paths, release: &Release) -> anyhow::Result<PathBuf
     Ok(dist)
 }
 
-/// Run `make` in `src` and copy the listed binaries into `dist/bin`.
+/// Build from source: `./configure --prefix=<dist>` + `make` + `make
+/// install` when the recipe has a configure step, otherwise `make` and copy
+/// the listed binaries into `dist/bin`.
 async fn compile(
     src: &std::path::Path,
     dist: &std::path::Path,
@@ -68,24 +71,21 @@ async fn compile(
 ) -> anyhow::Result<()> {
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     tracing::info!(dir = %src.display(), jobs, "compiling from source");
-    let out = tokio::process::Command::new("/usr/bin/make")
-        .arg(format!("-j{jobs}"))
-        .args(build.make_args)
-        .current_dir(src)
-        .output()
-        .await
-        .context(
-            "run make (are the Xcode command line tools installed? `xcode-select --install`)",
-        )?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = err.lines().rev().take(15).collect();
-        bail!(
-            "build failed ({}):\n{}",
-            out.status,
-            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        );
+    let make = |extra: &[&str]| {
+        let mut a = vec![format!("-j{jobs}")];
+        a.extend(build.make_args.iter().map(|s| s.to_string()));
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a
+    };
+    if let Some(conf) = build.configure {
+        let mut args = vec![format!("--prefix={}", dist.display())];
+        args.extend(conf.iter().map(|s| s.to_string()));
+        build_step(src, "./configure", &args).await?;
+        build_step(src, "/usr/bin/make", &make(&[])).await?;
+        build_step(src, "/usr/bin/make", &make(&["install"])).await?;
+        return Ok(());
     }
+    build_step(src, "/usr/bin/make", &make(&[])).await?;
     let bin = dist.join("bin");
     std::fs::create_dir_all(&bin)?;
     for b in build.binaries {
@@ -96,11 +96,35 @@ async fn compile(
     Ok(())
 }
 
+async fn build_step(src: &std::path::Path, prog: &str, args: &[String]) -> anyhow::Result<()> {
+    let out = tokio::process::Command::new(prog)
+        .args(args)
+        .current_dir(src)
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "run {prog} (are the Xcode command line tools installed? `xcode-select --install`)"
+            )
+        })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = err.lines().rev().take(15).collect();
+        bail!(
+            "{prog} failed ({}):\n{}",
+            out.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        );
+    }
+    Ok(())
+}
+
 /// Prepare an instance so it can start (config + data dir).
 pub async fn prepare(paths: &Paths, name: &str, inst: &Instance) -> anyhow::Result<()> {
     match inst.kind {
         Kind::Mysql => mysql::ensure_initialized(paths, name, inst).await,
         Kind::Valkey => valkey::prepare(paths, name, inst),
+        Kind::Postgres => postgres::ensure_initialized(paths, name, inst).await,
     }
 }
 
@@ -108,6 +132,7 @@ async fn after_start(paths: &Paths, name: &str, inst: &Instance) -> anyhow::Resu
     match inst.kind {
         Kind::Mysql => mysql::ensure_dev_accounts(paths, name, inst).await,
         Kind::Valkey => Ok(()),
+        Kind::Postgres => postgres::ensure_dev_roles(paths, inst).await,
     }
 }
 
@@ -115,6 +140,7 @@ fn spec(paths: &Paths, name: &str, inst: &Instance) -> corral_supervisor::Spec {
     match inst.kind {
         Kind::Mysql => mysql::spec(paths, name, inst),
         Kind::Valkey => valkey::spec(paths, name, inst),
+        Kind::Postgres => postgres::spec(paths, name, inst),
     }
 }
 
@@ -161,6 +187,7 @@ pub async fn sync(paths: &Paths, sup: &Supervisor) -> anyhow::Result<()> {
         let changed = match inst.kind {
             Kind::Mysql => mysql::write_option_file(paths, name, inst)?,
             Kind::Valkey => valkey::write_config(paths, name, inst)?,
+            Kind::Postgres => false, // configured with command-line flags
         };
         let state = sup.state(&store::unit(name)).await;
         let healthy = matches!(

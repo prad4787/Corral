@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Mysql,
     Valkey,
+    Postgres,
 }
 
 impl Kind {
@@ -20,6 +21,7 @@ impl Kind {
             "mysql" => Some(Self::Mysql),
             // Valkey is the BSD-licensed Redis fork; `redis` is accepted as an alias.
             "valkey" | "redis" => Some(Self::Valkey),
+            "postgres" | "postgresql" | "pgsql" => Some(Self::Postgres),
             _ => None,
         }
     }
@@ -27,24 +29,28 @@ impl Kind {
         match self {
             Self::Mysql => "mysql",
             Self::Valkey => "valkey",
+            Self::Postgres => "postgres",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::Mysql => "MySQL",
             Self::Valkey => "Valkey (Redis-compatible)",
+            Self::Postgres => "PostgreSQL",
         }
     }
     pub fn default_port(self) -> u16 {
         match self {
             Self::Mysql => 3306,
             Self::Valkey => 6379,
+            Self::Postgres => 5432,
         }
     }
     pub fn license(self) -> &'static str {
         match self {
             Self::Mysql => "GPL-2.0 (with FOSS exception), Oracle MySQL Community Server",
             Self::Valkey => "BSD-3-Clause, Valkey (Linux Foundation)",
+            Self::Postgres => "PostgreSQL License (permissive, BSD-like)",
         }
     }
 }
@@ -61,10 +67,12 @@ pub struct Artifact {
     pub build: Option<Build>,
 }
 
-/// A source build: run `make` with `args` and copy `binaries` (paths relative
-/// to the source tree) into `bin/`.
+/// A source build. With `configure`, runs `./configure --prefix=<dist> …`,
+/// `make` and `make install`; otherwise runs `make` and copies `binaries`
+/// (paths relative to the source tree) into `bin/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Build {
+    pub configure: Option<&'static [&'static str]>,
     pub make_args: &'static [&'static str],
     pub binaries: &'static [&'static str],
 }
@@ -102,12 +110,32 @@ const VALKEY_SRC: Artifact = Artifact {
     strip: 1,
     provenance: "2026-11-10: from github.com/valkey-io/valkey-hashes README",
     build: Some(Build {
+        configure: None,
         make_args: &["BUILD_TLS=no", "MALLOC=libc"],
         binaries: &["src/valkey-server", "src/valkey-cli"],
     }),
 };
 
+const POSTGRES_SRC: Artifact = Artifact {
+    url: "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.gz",
+    sha256: "983ee554ec53dbeb9b70797bef9fcf4e67e117e7e48ca1463cc80b3ff8e8ff3f",
+    strip: 1,
+    provenance: "2026-11-10: from postgresql-18.6.tar.gz.sha256 on ftp.postgresql.org",
+    build: Some(Build {
+        // ICU and readline are optional; skipping them avoids Homebrew deps.
+        configure: Some(&["--without-icu", "--without-readline"]),
+        make_args: &[],
+        binaries: &[],
+    }),
+};
+
 pub const RELEASES: &[Release] = &[
+    Release {
+        kind: Kind::Postgres,
+        version: "18.6",
+        arm64: Some(POSTGRES_SRC),
+        x86_64: Some(POSTGRES_SRC),
+    },
     Release {
         kind: Kind::Valkey,
         version: "9.1.3",

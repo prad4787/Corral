@@ -1183,21 +1183,37 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 corral_services::port_in_use(inst.port),
                 "{service} is not running; start Corral first"
             );
-            corral_services::mysql::create_database(&paths, &service, inst, &db).await?;
+            match inst.kind {
+                corral_services::manifest::Kind::Mysql => {
+                    corral_services::mysql::create_database(&paths, &service, inst, &db).await?
+                }
+                corral_services::manifest::Kind::Postgres => {
+                    corral_services::postgres::create_database(&paths, inst, &db).await?
+                }
+                other => bail!("{} has no databases", other.label()),
+            }
             println!(
                 "Database `{db}` ready on {service} (127.0.0.1:{})",
                 inst.port
             );
             // Provision the app's own account from .env (values never printed).
             let env = cwd()?.join(".env");
-            if let Some(user) = dotenv_value(&env, "DB_USERNAME").filter(|u| u != "root") {
+            let builtin = |u: &str| u == "root" || u == "postgres";
+            if let Some(user) = dotenv_value(&env, "DB_USERNAME").filter(|u| !builtin(u)) {
                 let password = dotenv_value(&env, "DB_PASSWORD").unwrap_or_default();
-                corral_services::mysql::ensure_app_user(
-                    &paths, &service, inst, &db, &user, &password,
-                )
-                .await?;
+                if inst.kind == corral_services::manifest::Kind::Postgres {
+                    corral_services::postgres::ensure_app_user(&paths, inst, &db, &user, &password)
+                        .await?;
+                } else {
+                    corral_services::mysql::ensure_app_user(
+                        &paths, &service, inst, &db, &user, &password,
+                    )
+                    .await?;
+                }
                 println!("Account `{user}` (password from .env) has full access to `{db}`");
-            } else if dotenv_value(&env, "DB_PASSWORD").is_some() {
+            } else if dotenv_value(&env, "DB_PASSWORD").is_some()
+                && inst.kind == corral_services::manifest::Kind::Mysql
+            {
                 println!(
                     "note: .env uses root with a password, but Corral's root has none. \
                      Set DB_PASSWORD= (empty) or use a dedicated DB_USERNAME."
@@ -1207,7 +1223,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Db(DbCmd::List { service }) => {
             let f = corral_services::store::ServicesFile::load(&paths)?;
             let inst = f.get(&service)?;
-            for db in corral_services::mysql::list_databases(&paths, &service, inst).await? {
+            let dbs = match inst.kind {
+                corral_services::manifest::Kind::Postgres => {
+                    corral_services::postgres::list_databases(&paths, inst).await?
+                }
+                _ => corral_services::mysql::list_databases(&paths, &service, inst).await?,
+            };
+            for db in dbs {
                 println!("{db}");
             }
         }

@@ -27,6 +27,9 @@ pub struct Spec {
     pub log_file: PathBuf,
     pub restart: RestartPolicy,
     pub stop_timeout: Duration,
+    /// Signal sent to the process group to stop it (SIGKILL follows after
+    /// `stop_timeout`). Defaults to SIGTERM.
+    pub stop_signal: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +68,7 @@ impl Spec {
             log_file: log_file.into(),
             restart: RestartPolicy::default(),
             stop_timeout: Duration::from_secs(5),
+            stop_signal: libc::SIGTERM,
         }
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -139,9 +143,9 @@ fn signal_group(pid: u32, sig: libc::c_int) {
     }
 }
 
-async fn terminate(child: &mut Child, timeout: Duration) {
+async fn terminate(child: &mut Child, timeout: Duration, sig: libc::c_int) {
     if let Some(pid) = child.id() {
-        signal_group(pid, libc::SIGTERM);
+        signal_group(pid, sig);
         if tokio::time::timeout(timeout, child.wait()).await.is_err() {
             signal_group(pid, libc::SIGKILL);
             let _ = child.wait().await;
@@ -171,7 +175,7 @@ async fn run(spec: Spec, state: watch::Sender<State>, stop: Arc<Notify>) {
         let status = tokio::select! {
             s = child.wait() => s,
             _ = stop.notified() => {
-                terminate(&mut child, spec.stop_timeout).await;
+                terminate(&mut child, spec.stop_timeout, spec.stop_signal).await;
                 let _ = state.send(State::Stopped);
                 tracing::info!(service = %spec.name, "stopped");
                 return;
