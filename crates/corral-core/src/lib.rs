@@ -5,6 +5,7 @@ pub mod drivers;
 pub mod fsutil;
 pub mod paths;
 pub mod php;
+pub mod shell;
 pub mod sites;
 
 pub use config::Config;

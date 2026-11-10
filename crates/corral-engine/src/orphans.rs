@@ -42,6 +42,17 @@ impl EngineLock {
     }
 }
 
+/// True if some engine (CLI or app) currently holds the lock.
+pub fn engine_running(paths: &Paths) -> bool {
+    match EngineLock::acquire(paths) {
+        Ok(lock) => {
+            drop(lock);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only tests for existence/permission.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -111,8 +122,10 @@ mod tests {
     fn lock_is_exclusive() {
         let t = tempfile::tempdir().unwrap();
         let p = Paths::at(t.path());
+        assert!(!engine_running(&p));
         let a = EngineLock::acquire(&p).unwrap();
         assert!(EngineLock::acquire(&p).is_err());
+        assert!(engine_running(&p));
         drop(a);
         assert!(EngineLock::acquire(&p).is_ok());
     }

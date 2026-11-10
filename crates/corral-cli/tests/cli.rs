@@ -99,3 +99,74 @@ fn tld_change_rotates_ca_and_hosts() {
     assert!(home.join("certs/app.localhost.crt").exists());
     assert!(!home.join("certs/app.test.crt").exists());
 }
+
+fn corral_home(home: &Path, user_home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_corral"))
+        .args(args)
+        .env("CORRAL_HOME", home)
+        .env("HOME", user_home)
+        .env("CORRAL_LOG", "error")
+        .current_dir(user_home)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn shell_path_and_uninstall_round_trip() {
+    let t = tempfile::tempdir().unwrap();
+    let user = t.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    let zshrc = user.join(".zshrc");
+    let original = "export EDITOR=vim\n";
+    std::fs::write(&zshrc, original).unwrap();
+    let home = t.path().join("corral");
+    let sites = user.join("Sites");
+    touch(&sites.join("app/index.php"));
+
+    ok(&corral_home(
+        &home,
+        &user,
+        &["park", sites.to_str().unwrap()],
+    ));
+    ok(&corral_home(&home, &user, &["render"]));
+    ok(&corral_home(&home, &user, &["shell-path"]));
+    assert!(
+        std::fs::read_to_string(&zshrc).unwrap().contains(".corral")
+            || std::fs::read_to_string(&zshrc)
+                .unwrap()
+                .contains(home.join("bin").to_str().unwrap())
+    );
+    let status = ok(&corral_home(&home, &user, &["status"]));
+    assert!(status.contains("engine:   stopped"), "{status}");
+    assert!(status.contains("PATH:     configured"), "{status}");
+
+    // Pretend a service has data that must survive a plain uninstall.
+    touch(&home.join("services/data/mysql/ibdata1"));
+
+    let dry = ok(&corral_home(&home, &user, &["uninstall"]));
+    assert!(dry.contains("Would remove"), "{dry}");
+    assert!(home.join("config.toml").exists(), "dry run changes nothing");
+
+    let out = ok(&corral_home(&home, &user, &["uninstall", "--yes"]));
+    assert!(out.contains("Keeping service data"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&zshrc).unwrap(),
+        original,
+        "rc restored exactly"
+    );
+    assert!(!home.join("config.toml").exists());
+    assert!(!home.join("certs").exists());
+    assert!(!home.join("bin").exists());
+    assert!(home.join("services/data/mysql/ibdata1").exists());
+
+    ok(&corral_home(
+        &home,
+        &user,
+        &["uninstall", "--yes", "--delete-data"],
+    ));
+    assert!(!home.exists());
+    assert!(
+        sites.join("app/index.php").exists(),
+        "user projects are never touched"
+    );
+}

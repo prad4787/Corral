@@ -83,6 +83,26 @@ enum Cmd {
     Trust,
     /// Check the environment for common problems.
     Doctor,
+    /// Show what is installed and whether Corral is running.
+    Status,
+    /// Add Corral's bin directory to your shell PATH (or --remove it).
+    ShellPath {
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Install or update Composer (verified against its published SHA-256).
+    Composer,
+    /// Remove Corral: shims, PATH lines, generated files and (with
+    /// --delete-data) runtimes and service data. Prints the sudo commands for
+    /// system-level undo.
+    Uninstall {
+        /// Actually do it (without this, only shows what would be removed).
+        #[arg(long)]
+        yes: bool,
+        /// Also delete databases and downloaded runtimes.
+        #[arg(long)]
+        delete_data: bool,
+    },
     /// Manage databases and other background services.
     #[command(subcommand)]
     Service(ServiceCmd),
@@ -278,6 +298,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     install::CADDY_VERSION,
                     bin.display()
                 );
+            }
+            if !install::composer_phar(&paths).exists() {
+                match install::install_composer(&paths).await {
+                    Ok(_) => println!("Installed Composer."),
+                    Err(e) => println!(
+                        "warning: Composer not installed ({e:#}); retry with `corral composer`"
+                    ),
+                }
             }
             let r = corral_engine::render(&paths)?;
             println!("Configuration written ({} sites).", r.sites.len());
@@ -488,6 +516,105 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
         }
         Cmd::Doctor => doctor(&paths, &cfg)?,
+        Cmd::Status => {
+            let running = corral_engine::orphans::engine_running(&paths);
+            println!("engine:   {}", if running { "running" } else { "stopped" });
+            println!(
+                "caddy:    {}",
+                if install::caddy_bin(&paths).exists() {
+                    "installed"
+                } else {
+                    "missing (corral setup)"
+                }
+            );
+            println!(
+                "composer: {}",
+                if install::composer_phar(&paths).exists() {
+                    "installed"
+                } else {
+                    "missing (corral composer)"
+                }
+            );
+            let php: Vec<String> = php::installed(&paths)?
+                .iter()
+                .map(|i| i.version.to_string())
+                .collect();
+            println!(
+                "php:      {} (default {})",
+                if php.is_empty() {
+                    "none".into()
+                } else {
+                    php.join(", ")
+                },
+                cfg.default_php.as_deref().unwrap_or("-")
+            );
+            let svc = corral_services::store::ServicesFile::load(&paths)?;
+            for (n, i) in &svc.instances {
+                println!(
+                    "service:  {n} {} {} :{} {}",
+                    i.kind.label(),
+                    i.version,
+                    i.port,
+                    if corral_services::port_in_use(i.port) {
+                        "listening"
+                    } else {
+                        "down"
+                    }
+                );
+            }
+            let sites = Registry::load(&paths)?.resolve(&cfg)?;
+            println!(
+                "sites:    {} on .{} (https :{}, http :{})",
+                sites.len(),
+                cfg.tld,
+                cfg.https_port,
+                cfg.http_port
+            );
+            let home = dirs_home()?;
+            let on_path = corral_core::shell::rc_files(&home)
+                .iter()
+                .any(|f| corral_core::shell::has_block(f));
+            println!(
+                "PATH:     {}",
+                if on_path {
+                    "configured"
+                } else {
+                    "not configured (corral shell-path)"
+                }
+            );
+        }
+        Cmd::ShellPath { remove } => {
+            let home = dirs_home()?;
+            for rc in corral_core::shell::rc_files(&home) {
+                let changed = if remove {
+                    corral_core::shell::uninstall(&rc)?
+                } else {
+                    corral_core::shell::install(&rc, &paths.bin)?
+                };
+                if changed {
+                    println!(
+                        "{} {}",
+                        if remove { "Removed from" } else { "Updated" },
+                        rc.display()
+                    );
+                }
+            }
+            if !remove {
+                println!(
+                    "Open a new terminal (or `source ~/.zshrc`); `which php` should then show {}",
+                    paths.bin.join("php").display()
+                );
+            }
+        }
+        Cmd::Composer => {
+            let phar = install::install_composer(&paths).await?;
+            println!(
+                "Installed Composer to {} (shim: {})",
+                phar.display(),
+                paths.bin.join("composer").display()
+            );
+        }
+        Cmd::Uninstall { yes, delete_data } => uninstall(&paths, &cfg, yes, delete_data)?,
         Cmd::Service(ServiceCmd::List) => {
             use corral_services::store::ServicesFile;
             let file = ServicesFile::load(&paths)?;
@@ -631,6 +758,104 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("logs:   {}", paths.logs_dir().display());
         }
     }
+    Ok(())
+}
+
+fn dirs_home() -> anyhow::Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
+
+fn uninstall(paths: &Paths, cfg: &Config, yes: bool, delete_data: bool) -> anyhow::Result<()> {
+    if corral_engine::orphans::engine_running(paths) {
+        bail!("Corral is running; stop it first (Ctrl-C `corral start`, or quit the app)");
+    }
+    let home = dirs_home()?;
+    let rcs: Vec<PathBuf> = corral_core::shell::rc_files(&home)
+        .into_iter()
+        .filter(|f| corral_core::shell::has_block(f))
+        .collect();
+    // Always kept unless --delete-data: databases and big downloads.
+    let keep = [paths.root.join("services/data")];
+    let mut remove: Vec<PathBuf> = vec![paths.bin.clone()];
+    if delete_data {
+        remove.push(paths.root.clone());
+    } else if let Ok(rd) = std::fs::read_dir(&paths.root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p == paths.root.join("services") {
+                // Keep data, drop generated confs + dist.
+                for sub in ["conf", "dist"] {
+                    remove.push(p.join(sub));
+                }
+            } else {
+                remove.push(p);
+            }
+        }
+    }
+    remove.retain(|p| p.exists() && !keep.contains(p));
+    remove.sort();
+    remove.dedup();
+    // Drop paths already covered by a parent in the list.
+    let all = remove.clone();
+    remove.retain(|p| !all.iter().any(|q| q != p && p.starts_with(q)));
+    for p in &remove {
+        anyhow::ensure!(paths.owns(p), "refusing to remove {}", p.display());
+    }
+
+    println!(
+        "{}",
+        if yes {
+            "Removing:"
+        } else {
+            "Would remove (re-run with --yes):"
+        }
+    );
+    for p in &remove {
+        println!("  {}", p.display());
+    }
+    for rc in &rcs {
+        println!("  Corral PATH block in {}", rc.display());
+    }
+    if !delete_data && keep[0].exists() {
+        println!(
+            "Keeping service data: {} (use --delete-data to remove)",
+            keep[0].display()
+        );
+    }
+    if yes {
+        for rc in &rcs {
+            corral_core::shell::uninstall(rc)?;
+        }
+        for p in &remove {
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)?;
+            } else {
+                std::fs::remove_file(p)?;
+            }
+        }
+        let dot = paths.bin.parent().filter(|d| d.ends_with(".corral"));
+        if let Some(d) = dot {
+            let _ = std::fs::remove_dir(d); // only if empty
+        }
+    }
+
+    // System-level changes need the user's password; Corral never runs sudo.
+    let resolver = PathBuf::from("/etc/resolver").join(&cfg.tld);
+    let ours = std::fs::read_to_string(&resolver).is_ok_and(|s| s.contains("Generated by Corral"));
+    println!("\nSystem changes to undo yourself (only if you made them with `corral trust`):");
+    if ours {
+        println!("  sudo rm {}", resolver.display());
+    } else if resolver.exists() {
+        println!(
+            "  (leave {} alone: it was not created by Corral)",
+            resolver.display()
+        );
+    }
+    println!(
+        "  sudo security delete-certificate -c \"Corral Local CA\" /Library/Keychains/System.keychain"
+    );
     Ok(())
 }
 
