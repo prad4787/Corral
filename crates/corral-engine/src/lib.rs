@@ -29,6 +29,9 @@ pub struct Rendered {
     pub fpm_versions: Vec<String>,
     /// Sites whose PHP version is not installed (served with 503 or fallback).
     pub missing_php: Vec<(String, String)>,
+    /// Versions whose generated php.ini / FPM config changed in this render;
+    /// their running pools must restart to pick it up.
+    pub changed_php: Vec<String>,
     pub caddy_config: PathBuf,
     pub ca_fingerprint: String,
 }
@@ -46,8 +49,11 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
     let versions: Vec<PhpVersion> = installs.iter().map(|i| i.version).collect();
     let default = cfg.default_php.as_deref().and_then(PhpVersion::parse);
 
+    let mut changed_php = Vec::new();
     for inst in &installs {
-        php::write_configs(paths, inst)?;
+        if php::write_configs(paths, inst)? {
+            changed_php.push(inst.version.to_string());
+        }
     }
     php::write_shims(paths, default)?;
 
@@ -99,6 +105,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
         sites,
         fpm_versions: fpm.into_iter().collect(),
         missing_php: missing,
+        changed_php,
         caddy_config: caddy_path,
         ca_fingerprint: ca.fingerprint()?,
     })
@@ -141,6 +148,26 @@ fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
         .chain(parked)
         .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         .collect()
+}
+
+/// Restart running pools for `versions` (their config changed).
+async fn restart_fpm(paths: &Paths, sup: &Supervisor, versions: &[String]) -> anyhow::Result<()> {
+    for v in versions {
+        let name = format!("php-fpm-{v}");
+        if sup.state(&name).await.is_none() {
+            continue;
+        }
+        let Some(inst) = PhpVersion::parse(v).and_then(|pv| php::find(paths, pv).ok().flatten())
+        else {
+            continue;
+        };
+        tracing::info!(version = %v, "PHP config changed; restarting pool");
+        sup.stop(&name).await.ok();
+        let _ = std::fs::remove_file(paths.fpm_socket(v));
+        sup.start(fpm_spec(paths, &inst)).await?;
+        wait_for_socket(&paths.fpm_socket(v), Duration::from_secs(10)).await;
+    }
+    Ok(())
 }
 
 /// Wait until a unix socket accepts connections.
@@ -249,6 +276,9 @@ pub async fn run(
                         if let Err(e) = sync_fpm(&paths, &sup, &r.fpm_versions).await {
                             tracing::error!(error = %e, "fpm sync failed");
                         }
+                        if let Err(e) = restart_fpm(&paths, &sup, &r.changed_php).await {
+                            tracing::error!(error = %e, "fpm restart failed");
+                        }
                     }
                     Err(e) => tracing::error!(error = %e, "render failed"),
                 }
@@ -351,5 +381,10 @@ mod tests {
         // Re-render is stable and keeps the CA.
         let r2 = render(&paths).unwrap();
         assert_eq!(r.ca_fingerprint, r2.ca_fingerprint);
+        assert_eq!(r.changed_php, ["8.4", "8.3"], "first render writes configs");
+        assert!(
+            r2.changed_php.is_empty(),
+            "unchanged configs must not restart pools"
+        );
     }
 }

@@ -103,7 +103,9 @@ post_max_size = 512M
 max_execution_time = 120
 display_errors = On
 display_startup_errors = On
-error_reporting = E_ALL
+; Deprecations from vendor code flood logs on new PHP versions; frameworks
+; set their own level at runtime. Override in conf.d if you want them.
+error_reporting = E_ALL & ~E_DEPRECATED
 log_errors = On
 error_log = {log}
 date.timezone = UTC
@@ -150,10 +152,13 @@ clear_env = no
 }
 
 /// Write the generated ini + fpm config for an installation. Idempotent.
-pub fn write_configs(paths: &Paths, inst: &Installation) -> std::io::Result<()> {
+/// Returns true when either file changed, i.e. a running pool must restart.
+pub fn write_configs(paths: &Paths, inst: &Installation) -> std::io::Result<bool> {
+    use crate::fsutil::write_if_changed;
     std::fs::create_dir_all(inst.conf_d())?;
-    write_atomic(&inst.ini(), base_ini(paths, inst).as_bytes())?;
-    write_atomic(&inst.fpm_conf(), fpm_conf(paths, inst).as_bytes())
+    let ini = write_if_changed(&inst.ini(), base_ini(paths, inst).as_bytes())?;
+    let fpm = write_if_changed(&inst.fpm_conf(), fpm_conf(paths, inst).as_bytes())?;
+    Ok(ini || fpm)
 }
 
 /// Command-line arguments to run FPM in the foreground under the supervisor.
@@ -277,7 +282,10 @@ pub(crate) mod tests {
         let t = tempfile::tempdir().unwrap();
         let p = Paths::at(t.path());
         let i = fake_install(&p, "8.4");
-        write_configs(&p, &i).unwrap();
+        assert!(write_configs(&p, &i).unwrap(), "first write changes files");
+        assert!(!write_configs(&p, &i).unwrap(), "second write is a no-op");
+        let ini = std::fs::read_to_string(i.ini()).unwrap();
+        assert!(ini.contains("error_reporting = E_ALL & ~E_DEPRECATED"));
         let fpm = std::fs::read_to_string(i.fpm_conf()).unwrap();
         assert!(fpm.contains(&format!("listen = {}", p.fpm_socket("8.4").display())));
         assert!(fpm.contains("daemonize = no"));
