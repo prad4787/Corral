@@ -766,6 +766,7 @@ dependencies = [
  "corral-system",
  "corral-tls",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

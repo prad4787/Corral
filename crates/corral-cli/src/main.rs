@@ -8,6 +8,8 @@ use corral_core::php::{self, PhpVersion};
 use corral_core::sites::Registry;
 use corral_core::{Config, Paths};
 use corral_engine::install;
+
+mod mcp;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -182,6 +184,9 @@ enum Cmd {
         #[arg(long)]
         site: Option<String>,
     },
+    /// Model Context Protocol server on stdio for coding agents (read-only).
+    /// Add to an agent with: `claude mcp add corral -- corral mcp`
+    Mcp,
     /// Show mail caught by Corral (SMTP on 127.0.0.1:2525).
     #[command(subcommand)]
     Mail(MailCmd),
@@ -811,6 +816,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 if on { "on" } else { "off" }
             );
         }
+        Cmd::Mcp => mcp::serve(&paths)?,
         Cmd::Mail(cmd) => {
             let store = corral_mail::Store::new(corral_mail::store_dir(&paths.root));
             match cmd {
