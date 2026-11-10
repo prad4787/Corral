@@ -16,6 +16,7 @@ corral-dns = { path = "crates/corral-dns" }
 corral-tls = { path = "crates/corral-tls" }
 corral-proxy = { path = "crates/corral-proxy" }
 corral-supervisor = { path = "crates/corral-supervisor" }
+corral-engine = { path = "crates/corral-engine" }
 
 anyhow = "1"
 thiserror = "2"
