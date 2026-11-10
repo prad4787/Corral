@@ -129,6 +129,10 @@ enum DbCmd {
         name: Option<String>,
         #[arg(long, default_value = "mysql")]
         service: String,
+        /// Switch ./.env to this dedicated DB_USERNAME (a backup of .env is
+        /// kept as .env.corral-backup). The existing DB_PASSWORD is reused.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// List databases.
     List {
@@ -147,6 +151,46 @@ fn dotenv_value(file: &std::path::Path, key: &str) -> Option<String> {
         let v = v.trim_matches(|c| c == '"' || c == '\'');
         (!v.is_empty()).then(|| v.to_string())
     })
+}
+
+/// Replace (or append) one `KEY=value` line in a dotenv file, keeping every
+/// other byte as-is. The first change writes `<file>.corral-backup`.
+fn set_dotenv_value(file: &std::path::Path, key: &str, value: &str) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    let backup = file.with_file_name(format!(
+        "{}.corral-backup",
+        file.file_name().and_then(|n| n.to_str()).unwrap_or(".env")
+    ));
+    if !backup.exists() {
+        std::fs::copy(file, &backup)?;
+    }
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let is_key = l
+                .trim_start()
+                .strip_prefix(key)
+                .is_some_and(|r| r.trim_start().starts_with('='));
+            if is_key && !found {
+                found = true;
+                format!("{key}={value}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(format!("{key}={value}"));
+    }
+    let mut body = out.join("\n");
+    if text.ends_with('\n') || !found {
+        body.push('\n');
+    }
+    let perms = std::fs::metadata(file)?.permissions();
+    corral_core::fsutil::write_atomic(file, body.as_bytes())?;
+    std::fs::set_permissions(file, perms)?;
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -526,7 +570,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 );
             }
         }
-        Cmd::Db(DbCmd::Create { name, service }) => {
+        Cmd::Db(DbCmd::Create {
+            name,
+            service,
+            user,
+        }) => {
+            if let Some(u) = &user {
+                anyhow::ensure!(
+                    corral_services::mysql::valid_user_name(u) && u != "root",
+                    "invalid --user {u:?}"
+                );
+                let env = cwd()?.join(".env");
+                set_dotenv_value(&env, "DB_USERNAME", u)?;
+                println!("Set DB_USERNAME={u} in .env (backup: .env.corral-backup)");
+            }
             let f = corral_services::store::ServicesFile::load(&paths)?;
             let inst = f.get(&service)?;
             let db = match name {
@@ -655,6 +712,30 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::dotenv_value;
+
+    #[test]
+    fn set_dotenv_value_replaces_only_that_line() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join(".env");
+        let orig = "APP_KEY=k\nDB_USERNAME=root\nDB_USERNAME_X=keep\nDB_PASSWORD=p\n";
+        std::fs::write(&f, orig).unwrap();
+        super::set_dotenv_value(&f, "DB_USERNAME", "elbilling").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "APP_KEY=k\nDB_USERNAME=elbilling\nDB_USERNAME_X=keep\nDB_PASSWORD=p\n"
+        );
+        let backup = t.path().join(".env.corral-backup");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), orig);
+        // A second change keeps the original backup.
+        super::set_dotenv_value(&f, "DB_USERNAME", "other").unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), orig);
+        super::set_dotenv_value(&f, "NEW_KEY", "1").unwrap();
+        assert!(
+            std::fs::read_to_string(&f)
+                .unwrap()
+                .ends_with("NEW_KEY=1\n")
+        );
+    }
 
     #[test]
     fn reads_single_dotenv_key() {
