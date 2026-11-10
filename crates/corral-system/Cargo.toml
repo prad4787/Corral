@@ -1,0 +1,20 @@
+[package]
+name = "corral-system"
+description = "macOS system integration for Corral: resolver, CA trust, ports 80/443 via launchd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+corral-core.workspace = true
+corral-dns.workspace = true
+corral-tls.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

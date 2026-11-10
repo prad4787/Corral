@@ -8,6 +8,8 @@
 pub mod install;
 pub mod node;
 pub mod orphans;
+pub mod project;
+pub mod uninstall;
 
 use anyhow::Context;
 use corral_core::paths::Paths;

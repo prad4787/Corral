@@ -43,6 +43,30 @@ export interface Overview {
   autostart: boolean;
   http_port: number;
   https_port: number;
+  system: SystemStatus;
+}
+
+export interface SystemStatus {
+  dns: boolean;
+  dns_foreign: boolean;
+  https: boolean;
+  ports: boolean;
+  ports_busy: boolean;
+}
+
+export interface EnvDb {
+  connection: string;
+  database: string | null;
+  username: string | null;
+  has_password: boolean;
+  service: string | null;
+  needs_dedicated_user: boolean;
+}
+
+export interface ProjectInfo {
+  laravel: boolean;
+  watchers: boolean;
+  db: EnvDb | null;
 }
 
 export interface MailSummary {
@@ -132,6 +156,13 @@ export const api = {
     invoke<string>("mail_save_attachment", { id, index }),
   dumpsList: () => invoke<Dump[]>("dumps_list", {}),
   dumpsClear: () => invoke<void>("dumps_clear"),
+  systemSetup: () => invoke<Overview>("system_setup"),
+  systemUndo: () => invoke<Overview>("system_undo"),
+  projectInfo: (site: string) => invoke<ProjectInfo>("project_info", { site }),
+  setWatchers: (site: string, enable: boolean) => invoke<void>("set_watchers", { site, enable }),
+  createDatabase: (site: string, dedicatedUser?: string) =>
+    invoke<string>("create_database", { site, dedicatedUser }),
+  uninstall: (deleteData: boolean) => invoke<void>("uninstall_corral", { deleteData }),
   eventsList: () => invoke<WatchEvent[]>("events_list", {}),
   eventsClear: () => invoke<void>("events_clear"),
   siteLogs: (site: string, level?: string) => invoke<LogEntry[]>("site_logs", { site, level }),

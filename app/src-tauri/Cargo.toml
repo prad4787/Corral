@@ -24,6 +24,7 @@ tauri-plugin-autostart = "~2.5"
 corral-services.workspace = true
 corral-mail.workspace = true
 corral-dumps.workspace = true
+corral-system.workspace = true
 corral-core.workspace = true
 corral-engine.workspace = true
 anyhow.workspace = true

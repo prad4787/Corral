@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-  import { api, type Overview, type MailSummary, type MailDetail, type Dump, type LogEntry, type WatchEvent } from "$lib/api";
+  import { api, type Overview, type MailSummary, type MailDetail, type Dump, type LogEntry, type WatchEvent, type ProjectInfo } from "$lib/api";
 
   type View = "overview" | "site" | "services" | "mail" | "dumps" | "settings";
 
@@ -38,13 +38,19 @@
   let logs = $state<LogEntry[] | null>(null);
   let logLevel = $state("");
   let openTrace = $state<number | null>(null);
+  // project (Laravel) info for the selected site
+  let project = $state<ProjectInfo | null>(null);
+  let dbUser = $state("");
+  // uninstall confirmation
+  let confirmUninstall = $state(false);
+  let deleteData = $state(false);
 
   const site = $derived(data?.sites.find((s) => s.name === selected) ?? null);
   const filtered = $derived(
     (data?.sites ?? []).filter((s) => s.host.includes(query.toLowerCase().trim())),
   );
   const needsSetup = $derived(
-    !!data && !skipSetup && (!data.caddy_installed || data.php.length === 0 || data.parked.length + data.sites.length === 0),
+    !!data && !skipSetup && (!data.caddy_installed || data.php.length === 0 || data.parked.length + data.sites.length === 0 || !(data.system.dns && data.system.https && data.system.ports)),
   );
   const statusText = $derived(
     !data ? "" : data.running ? "Running" : data.running_elsewhere ? "Running in terminal" : "Stopped",
@@ -99,6 +105,26 @@
     envText = null;
     envFor = null;
     logs = null;
+    project = null;
+    api.projectInfo(name).then((p) => {
+      project = p;
+      dbUser = p.db?.database?.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 32) ?? "";
+    }).catch(() => {});
+  }
+
+  async function toggleWatchers(name: string, enable: boolean) {
+    await act("watch", async () => {
+      await api.setWatchers(name, enable);
+      project = await api.projectInfo(name);
+      notice = enable ? "Watchers enabled: see Dumps → Activity." : "Watchers removed.";
+    });
+  }
+
+  async function createDb(name: string, dedicated: boolean) {
+    await act("db", async () => {
+      notice = await api.createDatabase(name, dedicated ? dbUser : undefined);
+      project = await api.projectInfo(name);
+    });
   }
 
   async function refreshInbox() {
@@ -212,7 +238,7 @@
 {#if needsSetup && data}
   <main class="setup">
     <h1>Set up Corral</h1>
-    <p class="sub">Free, local PHP development. Each step can be undone with <code>corral uninstall</code>.</p>
+    <p class="sub">Free, local PHP development. Everything here can be undone later in Settings.</p>
 
     {#if error}<div class="error" role="alert">{error}</div>{/if}
 
@@ -246,6 +272,19 @@
         </div>
         {#if data.parked.length > 0}<span class="badge ok">{data.sites.length} sites</span>{:else}
           <button class="btn primary" disabled={!!busy} onclick={addParked}>Choose folder…</button>
+        {/if}
+      </li>
+      <li class:done={data.system.dns && data.system.https && data.system.ports}>
+        <div>
+          <strong>.{data.tld} domains and HTTPS</strong>
+          <p>Lets your browser open <code>https://site.{data.tld}</code> with a trusted certificate on the normal ports. macOS asks for your password once, then to confirm the certificate.</p>
+          {#if data.system.ports_busy}<p class="warn">Another app (Valet, MAMP or Docker?) is using ports 80/443. Quit it first.</p>{/if}
+          {#if data.system.dns_foreign}<p class="warn">Another tool set up .{data.tld} before. Corral will take it over.</p>{/if}
+        </div>
+        {#if data.system.dns && data.system.https && data.system.ports}<span class="badge ok">Done</span>{:else}
+          <button class="btn primary" disabled={!!busy || !data.caddy_installed || data.system.ports_busy} onclick={() => run("system", api.systemSetup)}>
+            {busy === "system" ? "Waiting for macOS…" : "Set up"}
+          </button>
         {/if}
       </li>
       <li class:done={data.path_configured}>
@@ -386,6 +425,38 @@
           </dd>
         </dl>
 
+        {#if project?.laravel}
+          <section>
+            <h2>Laravel</h2>
+            <ul class="list">
+              <li>
+                <div><strong>Watchers</strong><small>Show queries, HTTP calls, logs, views, cache and jobs in Dumps → Activity. Adds a dev-only package to composer.json.</small></div>
+                <label class="toggle">
+                  <input type="checkbox" checked={project.watchers} disabled={!!busy}
+                    onchange={(e) => toggleWatchers(site.name, e.currentTarget.checked)} />
+                  {busy === "watch" ? "Working…" : project.watchers ? "On" : "Off"}
+                </label>
+              </li>
+              {#if project.db && ["mysql", "mariadb", "pgsql"].includes(project.db.connection)}
+                <li>
+                  <div>
+                    <strong>Database</strong>
+                    <small>{project.db.connection} · {project.db.database ?? "no DB_DATABASE"}{project.db.username ? ` · user ${project.db.username}` : ""}{project.db.service ? ` · on ${project.db.service}` : " · no matching service yet"}</small>
+                    {#if project.db.needs_dedicated_user}
+                      <small class="warn">.env uses root with a password. Corral will switch it to its own user (your .env is backed up first):</small>
+                      <input class="inline" bind:value={dbUser} aria-label="Database user" />
+                    {/if}
+                  </div>
+                  <button class="btn small" disabled={!!busy || !project.db.service || !project.db.database}
+                    onclick={() => createDb(site.name, !!project?.db?.needs_dedicated_user)}>
+                    {busy === "db" ? "Creating…" : "Create database"}
+                  </button>
+                </li>
+              {/if}
+            </ul>
+          </section>
+        {/if}
+
         <section>
           <h2>Environment (.env)</h2>
           {#if envFor === site.name && envText !== null}
@@ -502,7 +573,7 @@
           <button class:active={dumpPane === "activity"} onclick={() => (dumpPane = "activity")}>Queries, HTTP, logs…</button>
         </div>
         {#if dumpPane === "activity"}
-          <p class="sub">From Laravel sites with watchers enabled (<code>corral watch enable</code> in the project).</p>
+          <p class="sub">From Laravel sites with watchers turned on (open a site → Laravel → Watchers).</p>
           <div class="seg">
             {#each ["", "query", "http", "log", "view", "cache", "job"] as k (k)}
               <button class:active={eventKind === k} onclick={() => (eventKind = k)}>{k || "all"}</button>
@@ -672,8 +743,39 @@
           </ul>
         </section>
         <section>
-          <h2>Network</h2>
+          <h2>System</h2>
+          <ul class="list">
+            <li><span>.{data.tld} domains point to Corral</span><span class="badge" class:ok={data.system.dns}>{data.system.dns ? "on" : "off"}</span></li>
+            <li><span>HTTPS certificates trusted</span><span class="badge" class:ok={data.system.https}>{data.system.https ? "on" : "off"}</span></li>
+            <li><span>Ports 80/443 (URLs without a port number)</span><span class="badge" class:ok={data.system.ports}>{data.system.ports ? "on" : "off"}</span></li>
+          </ul>
+          <div class="buttons">
+            {#if !(data.system.dns && data.system.https && data.system.ports)}
+              <button class="btn primary" disabled={!!busy || data.system.ports_busy} onclick={() => run("system", api.systemSetup)}>
+                {busy === "system" ? "Waiting for macOS…" : "Set up"}
+              </button>
+            {/if}
+            {#if data.system.dns || data.system.https || data.system.ports}
+              <button class="btn" disabled={!!busy} onclick={() => run("system", api.systemUndo)}>Remove</button>
+            {/if}
+          </div>
+          {#if data.system.ports_busy}<p class="warn">Another app is using ports 80/443. Quit it to use plain https://site.{data.tld} URLs.</p>{/if}
           <p class="sub">Sites on .{data.tld} · HTTP :{data.http_port} · HTTPS :{data.https_port}</p>
+        </section>
+        <section>
+          <h2>Uninstall</h2>
+          {#if !confirmUninstall}
+            <button class="btn danger" onclick={() => (confirmUninstall = true)}>Uninstall Corral…</button>
+          {:else}
+            <p>This removes Corral's runtimes, settings, certificates and system integration, then quits. Your projects are never touched.</p>
+            <label class="toggle"><input type="checkbox" bind:checked={deleteData} /> Also delete databases (MySQL, PostgreSQL, Valkey data)</label>
+            <div class="buttons">
+              <button class="btn danger" disabled={!!busy} onclick={() => act("uninstall", () => api.uninstall(deleteData))}>
+                {busy === "uninstall" ? "Removing…" : "Uninstall now"}
+              </button>
+              <button class="btn" onclick={() => (confirmUninstall = false)}>Cancel</button>
+            </div>
+          {/if}
         </section>
       {:else if data}
         <h1>Sites</h1>
@@ -844,6 +946,11 @@
   .log .msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .log.lvl-error .badge, .log.lvl-critical .badge, .log.lvl-alert .badge, .log.lvl-emergency .badge { color: var(--danger); }
   .log.lvl-warning .badge { color: #b7791f; }
+  .warn { color: #b7791f; }
+  input.inline {
+    font: inherit; padding: 4px 8px; margin-top: 4px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); width: 200px;
+  }
   .setup { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
   .steps { list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; counter-reset: step; }
   .steps li {

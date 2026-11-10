@@ -147,6 +147,12 @@ enum Cmd {
         #[arg(long)]
         site: Option<String>,
     },
+    /// macOS integration: `.test` DNS, HTTPS trust and ports 80/443.
+    /// `setup` shows the standard macOS password dialog once.
+    System {
+        /// status, setup or remove
+        action: String,
+    },
     /// Show events from the Laravel watchers, newest first.
     Events {
         #[arg(short = 'n', long, default_value_t = 30)]
@@ -218,57 +224,7 @@ enum DbCmd {
     },
 }
 
-/// Read one key from a dotenv file without printing anything else from it.
-fn dotenv_value(file: &std::path::Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    text.lines().find_map(|l| {
-        let l = l.trim();
-        let rest = l.strip_prefix(key)?.trim_start().strip_prefix('=')?;
-        let v = rest.split(" #").next().unwrap_or("").trim();
-        let v = v.trim_matches(|c| c == '"' || c == '\'');
-        (!v.is_empty()).then(|| v.to_string())
-    })
-}
-
-/// Replace (or append) one `KEY=value` line in a dotenv file, keeping every
-/// other byte as-is. The first change writes `<file>.corral-backup`.
-fn set_dotenv_value(file: &std::path::Path, key: &str, value: &str) -> anyhow::Result<()> {
-    let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-    let backup = file.with_file_name(format!(
-        "{}.corral-backup",
-        file.file_name().and_then(|n| n.to_str()).unwrap_or(".env")
-    ));
-    if !backup.exists() {
-        std::fs::copy(file, &backup)?;
-    }
-    let mut found = false;
-    let mut out: Vec<String> = text
-        .lines()
-        .map(|l| {
-            let is_key = l
-                .trim_start()
-                .strip_prefix(key)
-                .is_some_and(|r| r.trim_start().starts_with('='));
-            if is_key && !found {
-                found = true;
-                format!("{key}={value}")
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    if !found {
-        out.push(format!("{key}={value}"));
-    }
-    let mut body = out.join("\n");
-    if text.ends_with('\n') || !found {
-        body.push('\n');
-    }
-    let perms = std::fs::metadata(file)?.permissions();
-    corral_core::fsutil::write_atomic(file, body.as_bytes())?;
-    std::fs::set_permissions(file, perms)?;
-    Ok(())
-}
+use corral_core::dotenv::{set_value as set_dotenv_value, value as dotenv_value};
 
 #[derive(Subcommand)]
 enum MailCmd {
@@ -693,52 +649,34 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .into_iter()
                 .find(|x| x.name == name)
                 .with_context(|| format!("no site named {name:?}"))?;
-            anyhow::ensure!(
-                s.path.join("artisan").exists(),
-                "{name} is not a Laravel project"
-            );
-            anyhow::ensure!(
-                install::composer_phar(&paths).exists(),
-                "Composer missing: run `corral composer`"
-            );
-            let composer = |args: &[&str]| -> anyhow::Result<()> {
-                let st = std::process::Command::new(paths.bin.join("composer"))
-                    .args(args)
-                    .arg("--no-interaction")
-                    .current_dir(&s.path)
-                    .env(
-                        "PATH",
-                        format!(
-                            "{}:{}",
-                            paths.bin.display(),
-                            std::env::var("PATH").unwrap_or_default()
-                        ),
-                    )
-                    .status()?;
-                anyhow::ensure!(st.success(), "composer {} failed", args.join(" "));
-                Ok(())
-            };
-            match action.as_str() {
-                "enable" => {
-                    let dir = corral_dumps::events::write_laravel_package(&paths.root)?;
-                    let repo = serde_json::json!({
-                        "type": "path",
-                        "url": dir.display().to_string(),
-                        "options": { "symlink": true }
-                    })
-                    .to_string();
-                    composer(&["config", "repositories.corral-laravel", &repo])?;
-                    composer(&["require", "--dev", "corral/laravel:@dev"])?;
-                    println!(
-                        "Watchers enabled for {name}. Events appear in `corral events` and the app while Corral runs."
-                    );
-                }
-                "disable" => {
-                    composer(&["remove", "--dev", "corral/laravel"])?;
-                    composer(&["config", "--unset", "repositories.corral-laravel"])?;
-                    println!("Watchers removed from {name}.");
-                }
+            let enable = match action.as_str() {
+                "enable" => true,
+                "disable" => false,
                 other => bail!("unknown action {other:?}: use enable or disable"),
+            };
+            corral_engine::project::set_watchers(&paths, &s.path, enable)?;
+            println!(
+                "Watchers {} for {name}.",
+                if enable { "enabled" } else { "removed" }
+            );
+        }
+        Cmd::System { action } => {
+            let exe = std::env::current_exe()?;
+            let st = match action.as_str() {
+                "status" => corral_system::status(&paths, &cfg),
+                "setup" => corral_system::setup(&paths, &exe)?,
+                "remove" => corral_system::undo(&paths)?,
+                other => bail!("unknown action {other:?}: use status, setup or remove"),
+            };
+            let mark = |b: bool| if b { "ok  " } else { "--  " };
+            println!("{}.{} domains -> Corral DNS", mark(st.dns), cfg.tld);
+            println!("{}HTTPS certificates trusted", mark(st.https));
+            println!("{}ports 80/443 -> Corral", mark(st.ports));
+            if st.dns_foreign {
+                println!("note: /etc/resolver/{} belongs to another tool", cfg.tld);
+            }
+            if st.ports_busy {
+                println!("note: another app is using ports 80/443");
             }
         }
         Cmd::Events { limit, kind, clear } => {
@@ -1278,39 +1216,7 @@ fn uninstall(paths: &Paths, cfg: &Config, yes: bool, delete_data: bool) -> anyho
     if corral_engine::orphans::engine_running(paths) {
         bail!("Corral is running; stop it first (Ctrl-C `corral start`, or quit the app)");
     }
-    let home = dirs_home()?;
-    let rcs: Vec<PathBuf> = corral_core::shell::rc_files(&home)
-        .into_iter()
-        .filter(|f| corral_core::shell::has_block(f))
-        .collect();
-    // Always kept unless --delete-data: databases and big downloads.
-    let keep = [paths.root.join("services/data")];
-    let mut remove: Vec<PathBuf> = vec![paths.bin.clone()];
-    if delete_data {
-        remove.push(paths.root.clone());
-    } else if let Ok(rd) = std::fs::read_dir(&paths.root) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p == paths.root.join("services") {
-                // Keep data, drop generated confs + dist.
-                for sub in ["conf", "dist"] {
-                    remove.push(p.join(sub));
-                }
-            } else {
-                remove.push(p);
-            }
-        }
-    }
-    remove.retain(|p| p.exists() && !keep.contains(p));
-    remove.sort();
-    remove.dedup();
-    // Drop paths already covered by a parent in the list.
-    let all = remove.clone();
-    remove.retain(|p| !all.iter().any(|q| q != p && p.starts_with(q)));
-    for p in &remove {
-        anyhow::ensure!(paths.owns(p), "refusing to remove {}", p.display());
-    }
-
+    let plan = corral_engine::uninstall::plan(paths, &dirs_home()?, delete_data)?;
     println!(
         "{}",
         if yes {
@@ -1319,50 +1225,33 @@ fn uninstall(paths: &Paths, cfg: &Config, yes: bool, delete_data: bool) -> anyho
             "Would remove (re-run with --yes):"
         }
     );
-    for p in &remove {
+    for p in &plan.remove {
         println!("  {}", p.display());
     }
-    for rc in &rcs {
+    for rc in &plan.shell_files {
         println!("  Corral PATH block in {}", rc.display());
     }
-    if !delete_data && keep[0].exists() {
+    if let Some(k) = &plan.kept {
         println!(
             "Keeping service data: {} (use --delete-data to remove)",
-            keep[0].display()
+            k.display()
+        );
+    }
+    let sys = corral_system::status(paths, cfg);
+    let system_changes =
+        sys.dns || sys.ports || sys.https || corral_system::daemon_plist_path().exists();
+    if system_changes {
+        println!(
+            "System integration (.{} DNS, HTTPS trust, ports 80/443) will be removed too.",
+            cfg.tld
         );
     }
     if yes {
-        for rc in &rcs {
-            corral_core::shell::uninstall(rc)?;
+        if system_changes {
+            corral_system::undo(paths)?;
         }
-        for p in &remove {
-            if p.is_dir() {
-                std::fs::remove_dir_all(p)?;
-            } else {
-                std::fs::remove_file(p)?;
-            }
-        }
-        let dot = paths.bin.parent().filter(|d| d.ends_with(".corral"));
-        if let Some(d) = dot {
-            let _ = std::fs::remove_dir(d); // only if empty
-        }
+        corral_engine::uninstall::apply(paths, &plan)?;
     }
-
-    // System-level changes need the user's password; Corral never runs sudo.
-    let resolver = PathBuf::from("/etc/resolver").join(&cfg.tld);
-    let ours = std::fs::read_to_string(&resolver).is_ok_and(|s| s.contains("Generated by Corral"));
-    println!("\nSystem changes to undo yourself (only if you made them with `corral trust`):");
-    if ours {
-        println!("  sudo rm {}", resolver.display());
-    } else if resolver.exists() {
-        println!(
-            "  (leave {} alone: it was not created by Corral)",
-            resolver.display()
-        );
-    }
-    println!(
-        "  sudo security delete-certificate -c \"Corral Local CA\" /Library/Keychains/System.keychain"
-    );
     Ok(())
 }
 
@@ -1426,8 +1315,22 @@ fn doctor(paths: &Paths, cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn main() {
+    // Run by launchd when `corral system setup` registered the CLI binary.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--port-forward") {
+        let port = |i: usize, d: u16| args.get(i).and_then(|a| a.parse().ok()).unwrap_or(d);
+        if let Err(e) = corral_system::forward::main_from_launchd(port(2, 18080), port(3, 18443)) {
+            eprintln!("corral port forwarder: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    real_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn real_main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("CORRAL_LOG")
@@ -1438,51 +1341,5 @@ async fn main() {
     if let Err(e) = run(Cli::parse()).await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dotenv_value;
-
-    #[test]
-    fn set_dotenv_value_replaces_only_that_line() {
-        let t = tempfile::tempdir().unwrap();
-        let f = t.path().join(".env");
-        let orig = "APP_KEY=k\nDB_USERNAME=root\nDB_USERNAME_X=keep\nDB_PASSWORD=p\n";
-        std::fs::write(&f, orig).unwrap();
-        super::set_dotenv_value(&f, "DB_USERNAME", "elbilling").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&f).unwrap(),
-            "APP_KEY=k\nDB_USERNAME=elbilling\nDB_USERNAME_X=keep\nDB_PASSWORD=p\n"
-        );
-        let backup = t.path().join(".env.corral-backup");
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), orig);
-        // A second change keeps the original backup.
-        super::set_dotenv_value(&f, "DB_USERNAME", "other").unwrap();
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), orig);
-        super::set_dotenv_value(&f, "NEW_KEY", "1").unwrap();
-        assert!(
-            std::fs::read_to_string(&f)
-                .unwrap()
-                .ends_with("NEW_KEY=1\n")
-        );
-    }
-
-    #[test]
-    fn reads_single_dotenv_key() {
-        let t = tempfile::tempdir().unwrap();
-        let f = t.path().join(".env");
-        std::fs::write(
-            &f,
-            "APP_KEY=base64:secret\nDB_DATABASE=\"el_billing\" # comment\nDB_DATABASE_TEST=x\n",
-        )
-        .unwrap();
-        assert_eq!(
-            dotenv_value(&f, "DB_DATABASE").as_deref(),
-            Some("el_billing")
-        );
-        assert_eq!(dotenv_value(&f, "DB_DATABASE_TEST").as_deref(), Some("x"));
-        assert_eq!(dotenv_value(&f, "MISSING"), None);
     }
 }

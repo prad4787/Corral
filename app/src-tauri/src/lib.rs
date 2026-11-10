@@ -78,6 +78,7 @@ struct Overview {
     autostart: bool,
     http_port: u16,
     https_port: u16,
+    system: corral_system::Status,
 }
 
 fn home() -> std::path::PathBuf {
@@ -143,6 +144,7 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         http_port: cfg.http_port,
         https_port: cfg.https_port,
+        system: corral_system::status(paths, &cfg),
     })
 }
 
@@ -642,6 +644,104 @@ fn site_logs(
     logs::tail(&file, 4 << 20, limit.unwrap_or(100), min).map_err(err)
 }
 
+/// One macOS password dialog (plus the certificate-trust confirmation) sets
+/// up .test DNS, HTTPS trust and ports 80/443.
+#[tauri::command]
+async fn system_setup(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Overview> {
+    let paths = state.paths.clone();
+    let exe = std::env::current_exe().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || corral_system::setup(&paths, &exe))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+#[tauri::command]
+async fn system_undo(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Overview> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || corral_system::undo(&paths))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+#[derive(Serialize)]
+struct ProjectInfo {
+    laravel: bool,
+    watchers: bool,
+    db: Option<corral_engine::project::EnvDb>,
+}
+
+#[tauri::command]
+fn project_info(state: State<'_, AppState>, site: String) -> CmdResult<ProjectInfo> {
+    let path = site_path(&state, &site)?;
+    Ok(ProjectInfo {
+        laravel: corral_engine::project::is_laravel(&path),
+        watchers: corral_engine::project::watchers_enabled(&path),
+        db: corral_engine::project::env_db(&state.paths, &path).map_err(err)?,
+    })
+}
+
+#[tauri::command]
+async fn set_watchers(state: State<'_, AppState>, site: String, enable: bool) -> CmdResult<()> {
+    let path = site_path(&state, &site)?;
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        corral_engine::project::set_watchers(&paths, &path, enable)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+async fn create_database(
+    state: State<'_, AppState>,
+    site: String,
+    dedicated_user: Option<String>,
+) -> CmdResult<String> {
+    let path = site_path(&state, &site)?;
+    corral_engine::project::create_db_from_env(&state.paths, &path, dedicated_user.as_deref())
+        .await
+        .map_err(err)
+}
+
+/// Undo system integration, stop everything, remove Corral's files, quit.
+#[tauri::command]
+async fn uninstall_corral(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    delete_data: bool,
+) -> CmdResult<()> {
+    stop_engine_inner(&app, &state);
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<()> {
+        for _ in 0..240 {
+            if !orphans::engine_running(&paths) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let cfg = Config::load(&paths)?;
+        let st = corral_system::status(&paths, &cfg);
+        if st.dns || st.https || st.ports || corral_system::daemon_plist_path().exists() {
+            corral_system::undo(&paths)?;
+        }
+        let plan = corral_engine::uninstall::plan(&paths, &home(), delete_data)?;
+        corral_engine::uninstall::apply(&paths, &plan)?;
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    app.exit(0);
+    Ok(())
+}
+
 /// Open a project folder in an editor or terminal.
 #[tauri::command]
 fn open_in(path: String, target: String) -> CmdResult<()> {
@@ -798,6 +898,19 @@ pub fn run() {
         })
         .setup(|app| {
             build_tray(app)?;
+            // GUI-first: serve sites as soon as the app opens (if set up).
+            {
+                let handle = app.handle().clone();
+                let state = app.state::<AppState>();
+                let ready = install::caddy_bin(&state.paths).exists()
+                    && !php::installed(&state.paths).unwrap_or_default().is_empty();
+                if ready
+                    && !orphans::engine_running(&state.paths)
+                    && let Err(e) = start_engine_inner(&handle, &state)
+                {
+                    tracing::warn!(error = %e, "engine not started on launch");
+                }
+            }
             // Launched at login: start serving and stay in the menu bar.
             if std::env::args().any(|a| a == "--background") {
                 if let Some(w) = app.get_webview_window("main") {
@@ -850,6 +963,12 @@ pub fn run() {
             dumps_clear,
             events_list,
             events_clear,
+            system_setup,
+            system_undo,
+            project_info,
+            set_watchers,
+            create_database,
+            uninstall_corral,
             site_logs
         ])
         .build(tauri::generate_context!())

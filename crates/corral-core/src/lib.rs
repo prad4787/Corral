@@ -1,6 +1,7 @@
 //! Corral core: everything that does not need the network, root, or a GUI.
 
 pub mod config;
+pub mod dotenv;
 pub mod drivers;
 pub mod fsutil;
 pub mod logs;
