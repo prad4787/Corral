@@ -32,6 +32,9 @@ pub struct ProxySite {
     pub front_controller: Option<String>,
     /// `None` for static sites, or when the site's PHP version is not installed.
     pub fpm_socket: Option<PathBuf>,
+    /// Xdebug-enabled pool for the same PHP version, if available. Requests
+    /// carrying an Xdebug trigger (cookie or query) are routed here.
+    pub debug_socket: Option<PathBuf>,
     /// Present when the site is served over HTTPS.
     pub tls: Option<CertFiles>,
 }
@@ -66,25 +69,29 @@ pub fn proxy_sites(
     paths: &Paths,
     sites: &[Site],
     installed: &[PhpVersion],
+    debuggable: &[PhpVersion],
     cert_for: impl Fn(&str) -> CertFiles,
 ) -> Vec<ProxySite> {
     sites
         .iter()
         .map(|s| {
-            let fpm_socket = s.driver.front_controller.as_ref().and_then(|_| {
-                let v = s
-                    .php
+            let version = s.driver.front_controller.as_ref().and_then(|_| {
+                s.php
                     .as_deref()
                     .and_then(PhpVersion::parse)
                     .filter(|v| installed.contains(v))
-                    .or_else(|| installed.first().copied())?;
-                Some(paths.fpm_socket(&v.to_string()))
+                    .or_else(|| installed.first().copied())
             });
+            let fpm_socket = version.map(|v| paths.fpm_socket(&v.to_string()));
+            let debug_socket = version
+                .filter(|v| debuggable.contains(v))
+                .map(|v| paths.fpm_debug_socket(&v.to_string()));
             ProxySite {
                 host: s.host.clone(),
                 docroot: s.driver.docroot.clone(),
                 front_controller: s.driver.front_controller.clone(),
                 fpm_socket,
+                debug_socket,
                 tls: s.secure.then(|| cert_for(&s.host)),
             }
         })
@@ -95,8 +102,31 @@ fn unix(p: &Path) -> String {
     format!("unix/{}", p.display())
 }
 
+fn fastcgi(site: &ProxySite, socket: &Path) -> Value {
+    json!({
+        "handler": "reverse_proxy",
+        "transport": {
+            "protocol": "fastcgi",
+            "root": site.docroot.display().to_string(),
+            "split_path": [".php"],
+            "env": { "SERVER_NAME": site.host }
+        },
+        "upstreams": [{ "dial": unix(socket) }]
+    })
+}
+
+/// Matcher sets (OR-ed) that identify an Xdebug-triggered request.
+fn xdebug_triggers() -> Value {
+    json!([
+        { "path": ["*.php"], "header_regexp": { "Cookie": { "pattern": "(^|;\\s*)XDEBUG_(SESSION|TRIGGER|PROFILE|TRACE)=" } } },
+        { "path": ["*.php"], "query": { "XDEBUG_SESSION_START": ["*"] } },
+        { "path": ["*.php"], "query": { "XDEBUG_SESSION": ["*"] } },
+        { "path": ["*.php"], "query": { "XDEBUG_TRIGGER": ["*"] } }
+    ])
+}
+
 fn php_routes(site: &ProxySite, socket: &Path, fc: &str) -> Vec<Value> {
-    vec![
+    let mut v = vec![
         json!({
             "match": [{
                 "file": { "try_files": ["{http.request.uri.path}/index.php"] },
@@ -117,20 +147,19 @@ fn php_routes(site: &ProxySite, socket: &Path, fc: &str) -> Vec<Value> {
             }],
             "handle": [{ "handler": "rewrite", "uri": "{http.matchers.file.relative}" }]
         }),
-        json!({
-            "match": [{ "path": ["*.php"] }],
-            "handle": [{
-                "handler": "reverse_proxy",
-                "transport": {
-                    "protocol": "fastcgi",
-                    "root": site.docroot.display().to_string(),
-                    "split_path": [".php"],
-                    "env": { "SERVER_NAME": site.host }
-                },
-                "upstreams": [{ "dial": unix(socket) }]
-            }]
-        }),
-    ]
+    ];
+    if let Some(dbg) = &site.debug_socket {
+        v.push(json!({
+            "match": xdebug_triggers(),
+            "handle": [fastcgi(site, dbg)],
+            "terminal": true
+        }));
+    }
+    v.push(json!({
+        "match": [{ "path": ["*.php"] }],
+        "handle": [fastcgi(site, socket)]
+    }));
+    v
 }
 
 fn site_route(site: &ProxySite) -> Value {
@@ -270,6 +299,7 @@ mod tests {
             docroot: format!("/sites/{host}/public").into(),
             front_controller: Some("index.php".into()),
             fpm_socket: Some("/c/run/php-fpm-8.4.sock".into()),
+            debug_socket: None,
             tls: tls.then(|| CertFiles {
                 cert: format!("/c/certs/{host}.crt").into(),
                 key: format!("/c/certs/{host}.key").into(),
@@ -354,6 +384,7 @@ mod tests {
             docroot: "/sites/docs".into(),
             front_controller: None,
             fpm_socket: None,
+            debug_socket: None,
             tls: None,
         };
         let cfg = caddy_config(&settings(), &[missing, stat]);
@@ -364,6 +395,41 @@ mod tests {
         let docs = http[0]["handle"][0]["routes"].to_string();
         assert!(!docs.contains("fastcgi"));
         assert!(docs.contains("file_server"));
+    }
+
+    #[test]
+    fn xdebug_trigger_routes_to_debug_pool_first() {
+        let mut site = php_site("app.test", false);
+        site.debug_socket = Some("/c/run/php-fpm-8.4-debug.sock".into());
+        let cfg = caddy_config(&settings(), &[site]);
+        let sub = routes(&cfg, "corral_http")[0]["handle"][0]["routes"]
+            .as_array()
+            .unwrap();
+        let dials: Vec<&str> = sub
+            .iter()
+            .filter(|r| r["handle"][0]["handler"] == "reverse_proxy")
+            .map(|r| r["handle"][0]["upstreams"][0]["dial"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            dials,
+            [
+                "unix//c/run/php-fpm-8.4-debug.sock",
+                "unix//c/run/php-fpm-8.4.sock"
+            ]
+        );
+        let dbg = sub.iter().find(|r| r["terminal"] == true).unwrap();
+        let m = dbg["match"].as_array().unwrap();
+        assert_eq!(m.len(), 4, "cookie + three query triggers");
+        assert!(
+            m[0]["header_regexp"]["Cookie"]["pattern"]
+                .as_str()
+                .unwrap()
+                .contains("XDEBUG_")
+        );
+        assert_eq!(m[1]["query"]["XDEBUG_SESSION_START"][0], "*");
+        // Without a debug pool there is no trigger route.
+        let plain = caddy_config(&settings(), &[php_site("b.test", false)]);
+        assert!(!plain.to_string().contains("XDEBUG"));
     }
 
     #[test]
@@ -401,7 +467,7 @@ mod tests {
             PhpVersion::parse("8.4").unwrap(),
             PhpVersion::parse("8.3").unwrap(),
         ];
-        let ps = proxy_sites(&paths, &sites, &installed, |h| CertFiles {
+        let ps = proxy_sites(&paths, &sites, &installed, &installed[..1], |h| CertFiles {
             cert: format!("{h}.crt").into(),
             key: format!("{h}.key").into(),
         });

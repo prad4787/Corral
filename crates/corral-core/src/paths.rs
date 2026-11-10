@@ -53,6 +53,10 @@ impl Paths {
     pub fn fpm_socket(&self, version: &str) -> PathBuf {
         self.run_dir().join(format!("php-fpm-{version}.sock"))
     }
+    /// Socket of the Xdebug-enabled pool for `version`.
+    pub fn fpm_debug_socket(&self, version: &str) -> PathBuf {
+        self.run_dir().join(format!("php-fpm-{version}-debug.sock"))
+    }
     pub fn generated_dir(&self) -> PathBuf {
         self.root.join("generated")
     }
@@ -83,6 +87,23 @@ impl Paths {
         Ok(())
     }
 
+    /// macOS limits unix socket paths to 104 bytes (including the NUL).
+    /// Fail early with a clear message instead of cryptic bind errors.
+    pub fn check_socket_paths(&self) -> Result<(), String> {
+        const MAX: usize = 103;
+        // The longest socket Corral creates (debug pool of a two-digit minor).
+        let longest = self.fpm_debug_socket("10.10");
+        let len = longest.as_os_str().len();
+        if len > MAX {
+            return Err(format!(
+                "Corral's data directory path is too long for unix sockets ({len} > {MAX} bytes): {}. \
+                 Set CORRAL_HOME to a shorter path.",
+                self.root.display()
+            ));
+        }
+        Ok(())
+    }
+
     /// True if `p` lives inside Corral's data root. Used to refuse destructive
     /// operations on anything we do not own.
     pub fn owns(&self, p: &Path) -> bool {
@@ -104,6 +125,18 @@ mod tests {
         );
         assert!(p.owns(Path::new("/tmp/c/php/8.4")));
         assert!(!p.owns(Path::new("/etc/resolver/test")));
+    }
+
+    #[test]
+    fn socket_path_limit() {
+        assert!(
+            Paths::at("/Users/me/Library/Application Support/Corral")
+                .check_socket_paths()
+                .is_ok()
+        );
+        let long = format!("/tmp/{}", "x".repeat(90));
+        let err = Paths::at(long).check_socket_paths().unwrap_err();
+        assert!(err.contains("too long"), "{err}");
     }
 
     #[test]

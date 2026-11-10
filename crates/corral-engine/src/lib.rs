@@ -43,11 +43,17 @@ pub fn caddy_config_path(paths: &Paths) -> PathBuf {
 
 /// Generate every config file from current state. Idempotent.
 pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
+    paths.check_socket_paths().map_err(anyhow::Error::msg)?;
     paths.ensure()?;
     let cfg = Config::load(paths)?;
     let sites = Registry::load(paths)?.resolve(&cfg)?;
     let installs = php::installed(paths)?;
     let versions: Vec<PhpVersion> = installs.iter().map(|i| i.version).collect();
+    let debuggable: Vec<PhpVersion> = installs
+        .iter()
+        .filter(|i| php::xdebug_available(i))
+        .map(|i| i.version)
+        .collect();
     let default = cfg.default_php.as_deref().and_then(PhpVersion::parse);
 
     // The prepend file must exist before any ini references it.
@@ -83,7 +89,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
     let keep: Vec<&str> = leaves.keys().map(String::as_str).collect();
     ca.prune_leaves(&keep)?;
 
-    let proxy_sites = corral_proxy::proxy_sites(paths, &sites, &versions, |h| {
+    let proxy_sites = corral_proxy::proxy_sites(paths, &sites, &versions, &debuggable, |h| {
         let f = &leaves[h];
         CertFiles {
             cert: f.cert.clone(),
@@ -128,17 +134,37 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
     })
 }
 
-fn fpm_spec(paths: &Paths, inst: &Installation) -> Spec {
-    let mut spec = Spec::new(
-        format!("php-fpm-{}", inst.version),
-        inst.fpm(),
+/// The FPM pools for one installation: the normal pool, plus an Xdebug pool
+/// when the build ships xdebug.so. Returns (spec, socket) pairs.
+fn pool_specs(paths: &Paths, inst: &Installation) -> Vec<(Spec, std::path::PathBuf)> {
+    let v = inst.version.to_string();
+    let log = |suffix: &str| {
         paths
             .logs_dir()
-            .join(format!("php-fpm-{}.out.log", inst.version)),
-    )
-    .args(php::fpm_args(inst));
-    spec.env = php::php_env(inst);
-    spec
+            .join(format!("php-fpm-{v}{suffix}.out.log"))
+    };
+    let mut normal =
+        Spec::new(format!("php-fpm-{v}"), inst.fpm(), log("")).args(php::fpm_args(inst));
+    normal.env = php::php_env(inst);
+    let mut out = vec![(normal, paths.fpm_socket(&v))];
+    if php::xdebug_available(inst) {
+        let mut dbg = Spec::new(format!("php-fpm-{v}-debug"), inst.fpm(), log("-debug"))
+            .args(php::fpm_debug_args(inst));
+        dbg.env = php::php_env(inst);
+        out.push((dbg, paths.fpm_debug_socket(&v)));
+    }
+    out
+}
+
+async fn start_pool(sup: &Supervisor, spec: Spec, sock: &std::path::Path) -> anyhow::Result<()> {
+    // A stale socket from a crash would make FPM refuse to start.
+    let _ = std::fs::remove_file(sock);
+    let name = spec.name.clone();
+    sup.start(spec).await?;
+    if !wait_for_socket(sock, Duration::from_secs(10)).await {
+        tracing::error!(pool = %name, "PHP-FPM pool did not become ready; see its log");
+    }
+    Ok(())
 }
 
 fn caddy_spec(paths: &Paths) -> Spec {
@@ -201,19 +227,18 @@ fn user_ini_fingerprints(
 /// Restart running pools for `versions` (their config changed).
 async fn restart_fpm(paths: &Paths, sup: &Supervisor, versions: &[String]) -> anyhow::Result<()> {
     for v in versions {
-        let name = format!("php-fpm-{v}");
-        if sup.state(&name).await.is_none() {
-            continue;
-        }
         let Some(inst) = PhpVersion::parse(v).and_then(|pv| php::find(paths, pv).ok().flatten())
         else {
             continue;
         };
-        tracing::info!(version = %v, "PHP config changed; restarting pool");
-        sup.stop(&name).await.ok();
-        let _ = std::fs::remove_file(paths.fpm_socket(v));
-        sup.start(fpm_spec(paths, &inst)).await?;
-        wait_for_socket(&paths.fpm_socket(v), Duration::from_secs(10)).await;
+        for (spec, sock) in pool_specs(paths, &inst) {
+            if sup.state(&spec.name).await.is_none() {
+                continue;
+            }
+            tracing::info!(pool = %spec.name, "PHP config changed; restarting pool");
+            sup.stop(&spec.name).await.ok();
+            start_pool(sup, spec, &sock).await?;
+        }
     }
     Ok(())
 }
@@ -234,25 +259,29 @@ pub async fn wait_for_socket(path: &std::path::Path, timeout: Duration) -> bool 
 
 /// Start FPM pools for `want` and stop pools no longer needed.
 async fn sync_fpm(paths: &Paths, sup: &Supervisor, want: &[String]) -> anyhow::Result<()> {
+    let mut desired: Vec<(Spec, std::path::PathBuf)> = Vec::new();
+    for v in want {
+        let pv = PhpVersion::parse(v).context("bad version")?;
+        if let Some(inst) = php::find(paths, pv)? {
+            desired.extend(pool_specs(paths, &inst));
+        }
+    }
     let running: Vec<String> = sup
         .states()
         .await
         .into_iter()
-        .filter_map(|(n, _)| n.strip_prefix("php-fpm-").map(str::to_owned))
+        .map(|(n, _)| n)
+        .filter(|n| n.starts_with("php-fpm-"))
         .collect();
-    for v in running.iter().filter(|v| !want.contains(v)) {
-        sup.stop(&format!("php-fpm-{v}")).await.ok();
+    for name in running
+        .iter()
+        .filter(|n| !desired.iter().any(|(s, _)| &s.name == *n))
+    {
+        sup.stop(name).await.ok();
     }
-    for v in want.iter().filter(|v| !running.contains(v)) {
-        let pv = PhpVersion::parse(v).context("bad version")?;
-        if let Some(inst) = php::find(paths, pv)? {
-            // A stale socket from a crash would make FPM refuse to start.
-            let _ = std::fs::remove_file(paths.fpm_socket(v));
-            sup.start(fpm_spec(paths, &inst)).await?;
-            let sock = paths.fpm_socket(v);
-            if !wait_for_socket(&sock, Duration::from_secs(10)).await {
-                tracing::error!(socket = %sock.display(), "PHP-FPM {v} did not become ready; see its log");
-            }
+    for (spec, sock) in desired {
+        if !running.contains(&spec.name) {
+            start_pool(sup, spec, &sock).await?;
         }
     }
     Ok(())
