@@ -11,33 +11,40 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Mysql,
+    Valkey,
 }
 
 impl Kind {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "mysql" => Some(Self::Mysql),
+            // Valkey is the BSD-licensed Redis fork; `redis` is accepted as an alias.
+            "valkey" | "redis" => Some(Self::Valkey),
             _ => None,
         }
     }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mysql => "mysql",
+            Self::Valkey => "valkey",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::Mysql => "MySQL",
+            Self::Valkey => "Valkey (Redis-compatible)",
         }
     }
     pub fn default_port(self) -> u16 {
         match self {
             Self::Mysql => 3306,
+            Self::Valkey => 6379,
         }
     }
     pub fn license(self) -> &'static str {
         match self {
             Self::Mysql => "GPL-2.0 (with FOSS exception), Oracle MySQL Community Server",
+            Self::Valkey => "BSD-3-Clause, Valkey (Linux Foundation)",
         }
     }
 }
@@ -50,6 +57,16 @@ pub struct Artifact {
     pub strip: usize,
     /// How the digest was cross-checked when pinned.
     pub provenance: &'static str,
+    /// Source tarball that must be compiled (`make`) after extraction.
+    pub build: Option<Build>,
+}
+
+/// A source build: run `make` with `args` and copy `binaries` (paths relative
+/// to the source tree) into `bin/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build {
+    pub make_args: &'static [&'static str],
+    pub binaries: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,18 +96,39 @@ impl Release {
     }
 }
 
-pub const RELEASES: &[Release] = &[Release {
-    kind: Kind::Mysql,
-    version: "8.4.11",
-    arm64: Some(Artifact {
-        url: "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-macos15-arm64.tar.gz",
-        sha256: "b96e00493bc3499b9ffd7f08d65c5d64933af0383a8287d9873b64f94c2d6009",
-        strip: 1,
-        provenance: "2026-11-10: MD5 6e89113f04f2af85d0a164573493db3a matched Oracle's published .md5",
+const VALKEY_SRC: Artifact = Artifact {
+    url: "https://github.com/valkey-io/valkey/archive/refs/tags/9.1.3.tar.gz",
+    sha256: "184e34ed2d9b51879b682b5b15205e2b9d677c60280e3cb453be8f520d04e293",
+    strip: 1,
+    provenance: "2026-11-10: from github.com/valkey-io/valkey-hashes README",
+    build: Some(Build {
+        make_args: &["BUILD_TLS=no", "MALLOC=libc"],
+        binaries: &["src/valkey-server", "src/valkey-cli"],
     }),
-    // Not pinned yet: needs the same download + cross-check on the x86_64 artifact.
-    x86_64: None,
-}];
+};
+
+pub const RELEASES: &[Release] = &[
+    Release {
+        kind: Kind::Valkey,
+        version: "9.1.3",
+        // Same source for both CPUs; compiled locally.
+        arm64: Some(VALKEY_SRC),
+        x86_64: Some(VALKEY_SRC),
+    },
+    Release {
+        kind: Kind::Mysql,
+        version: "8.4.11",
+        arm64: Some(Artifact {
+            url: "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-macos15-arm64.tar.gz",
+            sha256: "b96e00493bc3499b9ffd7f08d65c5d64933af0383a8287d9873b64f94c2d6009",
+            strip: 1,
+            provenance: "2026-11-10: MD5 6e89113f04f2af85d0a164573493db3a matched Oracle's published .md5",
+            build: None,
+        }),
+        // Not pinned yet: needs the same download + cross-check on the x86_64 artifact.
+        x86_64: None,
+    },
+];
 
 /// Newest release of `kind` whose version starts with `want` (e.g. "8.4" or
 /// "8.4.11"); `None` for `want` picks the newest overall.
