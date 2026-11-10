@@ -91,6 +91,44 @@ echo "==> Timing (10 warm requests)"
 # shellcheck disable=SC2086
 for _ in $(seq 1 10); do curl -s -o /dev/null -w "%{time_total}\n" $R http://laravelish.test:18080/; done | sort -n | awk '{a[NR]=$1} END {print "median s:", a[int((NR+1)/2)]}'
 
+echo "==> Second engine must refuse to start while the first runs"
+if "$CORRAL" start > "$WORK/engine2.log" 2>&1; then
+  echo "FAIL second engine started"; fail=$((fail+1))
+elif grep -q "already running" "$WORK/engine2.log"; then
+  echo "PASS second engine refused (single-instance lock)"; pass=$((pass+1))
+else
+  echo "FAIL second engine: $(cat "$WORK/engine2.log")"; fail=$((fail+1))
+fi
+
+echo "==> SIGTERM must stop every child process"
+kill -TERM "$ENGINE_PID"; wait "$ENGINE_PID" 2>/dev/null || true; ENGINE_PID=""
+sleep 0.5
+if pgrep -f "$CORRAL_HOME" >/dev/null; then
+  echo "FAIL leftover processes after SIGTERM:"; pgrep -fl "$CORRAL_HOME"; fail=$((fail+1))
+else
+  echo "PASS no leftover processes after SIGTERM"; pass=$((pass+1))
+fi
+
+echo "==> SIGKILL leaves orphans; the next start must clean them up"
+"$CORRAL" start > "$WORK/engine3.log" 2>&1 &
+ENGINE_PID=$!
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:18080" && break; sleep 0.2; done
+sleep 1.5   # let the engine record its child PIDs
+kill -KILL "$ENGINE_PID"; wait "$ENGINE_PID" 2>/dev/null || true; ENGINE_PID=""
+sleep 0.3
+orphans_before=$(pgrep -f "$CORRAL_HOME" | wc -l | tr -d ' ')
+"$CORRAL" start > "$WORK/engine4.log" 2>&1 &
+ENGINE_PID=$!
+ok4=""
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:18080" && ok4=1 && break; sleep 0.2; done
+kill -TERM "$ENGINE_PID"; wait "$ENGINE_PID" 2>/dev/null || true; ENGINE_PID=""
+sleep 0.5
+if [[ "$orphans_before" -gt 0 && -n "$ok4" ]] && ! pgrep -f "$CORRAL_HOME" >/dev/null; then
+  echo "PASS $orphans_before orphan(s) reaped; restart served traffic; clean shutdown"; pass=$((pass+1))
+else
+  echo "FAIL orphan recovery (orphans_before=$orphans_before served=${ok4:-no})"; pgrep -fl "$CORRAL_HOME" || true; fail=$((fail+1))
+fi
+
 echo
 echo "Result: $pass passed, $fail failed. Engine log: $WORK/engine.log"
 [[ $fail -eq 0 ]]
