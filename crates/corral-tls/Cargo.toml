@@ -1,0 +1,20 @@
+[package]
+name = "corral-tls"
+description = "Local certificate authority and per-site certificates for Corral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+corral-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+time = "0.3"
+x509-parser = "0.18"
+
+[dev-dependencies]
+tempfile.workspace = true
