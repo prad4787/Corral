@@ -29,6 +29,10 @@ pub struct Config {
     pub secure_by_default: bool,
     /// Default Node.js major version for the `node`/`npm` shims.
     pub default_node: Option<u32>,
+    /// Catch outgoing mail on 127.0.0.1:`mail_port` (0 disables it).
+    pub mail_port: u16,
+    /// Send `dump()` output from PHP to Corral's dump viewer.
+    pub dumps: bool,
 }
 
 impl Default for Config {
@@ -45,6 +49,8 @@ impl Default for Config {
             parked: Vec::new(),
             secure_by_default: true,
             default_node: None,
+            mail_port: 2525,
+            dumps: true,
         }
     }
 }

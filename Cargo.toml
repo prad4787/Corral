@@ -19,6 +19,7 @@ corral-supervisor = { path = "crates/corral-supervisor" }
 corral-engine = { path = "crates/corral-engine" }
 corral-fetch = { path = "crates/corral-fetch" }
 corral-services = { path = "crates/corral-services" }
+corral-mail = { path = "crates/corral-mail" }
 
 
 anyhow = "1"

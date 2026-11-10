@@ -270,6 +270,24 @@ pub async fn run(
     let dns = tokio::spawn(corral_dns::serve(sock, zone));
     tracing::info!(%dns_addr, tld = %cfg.tld, "dns ready");
 
+    let mail = if cfg.mail_port == 0 {
+        None
+    } else {
+        match tokio::net::TcpListener::bind((cfg.loopback, cfg.mail_port)).await {
+            Ok(l) => {
+                tracing::info!(port = cfg.mail_port, "mail catcher ready");
+                Some(tokio::spawn(corral_mail::serve(
+                    l,
+                    corral_mail::Store::new(corral_mail::store_dir(&paths.root)),
+                )))
+            }
+            Err(e) => {
+                tracing::warn!(port = cfg.mail_port, error = %e, "mail catcher disabled: port unavailable");
+                None
+            }
+        }
+    };
+
     let sup = Supervisor::new();
     sync_fpm(&paths, &sup, &rendered.fpm_versions).await?;
     sup.start(caddy_spec(&paths)).await?;
@@ -343,6 +361,9 @@ pub async fn run(
         _ = watcher => {}
     }
     dns.abort();
+    if let Some(m) = mail {
+        m.abort();
+    }
     sup.stop_all().await;
     let _ = std::fs::remove_file(orphans::pid_file(&paths));
     Ok(())

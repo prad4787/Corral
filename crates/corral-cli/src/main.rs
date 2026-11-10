@@ -116,6 +116,9 @@ enum Cmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Show mail caught by Corral (SMTP on 127.0.0.1:2525).
+    #[command(subcommand)]
+    Mail(MailCmd),
     /// Manage databases and other background services.
     #[command(subcommand)]
     Service(ServiceCmd),
@@ -224,6 +227,19 @@ fn set_dotenv_value(file: &std::path::Path, key: &str, value: &str) -> anyhow::R
     corral_core::fsutil::write_atomic(file, body.as_bytes())?;
     std::fs::set_permissions(file, perms)?;
     Ok(())
+}
+
+#[derive(Subcommand)]
+enum MailCmd {
+    /// List caught messages, newest first.
+    List {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one message (text body, or HTML if there is no text part).
+    Show { id: String },
+    /// Delete all caught messages.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -524,6 +540,52 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             if !settings.is_empty() {
                 println!("# A running Corral restarts PHP {v} within ~1s.");
+            }
+        }
+        Cmd::Mail(cmd) => {
+            let store = corral_mail::Store::new(corral_mail::store_dir(&paths.root));
+            match cmd {
+                MailCmd::List { limit } => {
+                    let list = store.list(limit);
+                    if list.is_empty() {
+                        println!(
+                            "No mail yet. Point your app at it:\n  MAIL_MAILER=smtp\n  MAIL_HOST=127.0.0.1\n  MAIL_PORT={}",
+                            cfg.mail_port
+                        );
+                    }
+                    for m in list {
+                        println!(
+                            "{}  {:<28} {:<30} {}{}",
+                            m.id,
+                            m.from.chars().take(28).collect::<String>(),
+                            m.to.join(", ").chars().take(30).collect::<String>(),
+                            m.subject,
+                            if m.attachments > 0 {
+                                format!("  [{} attachment(s)]", m.attachments)
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
+                }
+                MailCmd::Show { id } => {
+                    let d = store.detail(&id)?;
+                    println!(
+                        "From:    {}\nTo:      {}\nSubject: {}",
+                        d.summary.from,
+                        d.summary.to.join(", "),
+                        d.summary.subject
+                    );
+                    if !d.cc.is_empty() {
+                        println!("Cc:      {}", d.cc.join(", "));
+                    }
+                    for a in &d.attachment_list {
+                        println!("Attach:  {} ({}, {} bytes)", a.name, a.content_type, a.size);
+                    }
+                    println!();
+                    println!("{}", d.text.or(d.html).unwrap_or_default());
+                }
+                MailCmd::Clear => println!("Deleted {} message(s)", store.clear()?),
             }
         }
         Cmd::Node(NodeCmd::List) => {
