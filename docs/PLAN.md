@@ -31,6 +31,7 @@ Rules for every phase:
 | 1.9 UI | ✅ Done | Onboarding, Sites/Services/Settings, tray, launch at login, open in editor/terminal |
 | 1.10 Uninstall | ✅ Done | Dry run by default; keeps service data unless `--delete-data`; prints the sudo undo steps |
 | **Phase 2** | ✅ Done (`v0.2.0`) | Node manager (1.17, SHASUMS256-verified), php.ini overrides with live pool restart (1.4), new-project wizard with starter kits (2.7, 1.16 via `composer create-project`), .env editor (2.3, textarea for now; CodeMirror later), open in editor/terminal (2.4), Tinker (2.5), TLD change (1.9, CLI). **Deferred:** URL scheme (5.2) moves to Phase 4. Extension toggling from 1.4 becomes ini overrides, because static PHP builds compile extensions in |
+| **Phase 3** | 🟡 Partial | Done: mail catcher (4.1), dump viewer (4.2, 4.4, 4.5), log viewer (4.8), Valkey (3.4, source build, **not yet run on a real machine**), plus MySQL below. Open: Laravel watchers for queries/HTTP/views (4.3); Postgres, Meilisearch, Typesense, MinIO, MongoDB, Reverb, Adminer (3.2–3.3, 3.5–3.11); sharing (2.8); **Xdebug (4.6) is blocked** on our own PHP builds, because static builds cannot load shared extensions |
 | 3.1 MySQL | ✅ Done (pulled forward) | 8.4.11 pinned by SHA-256; `corral service`/`corral db`; validated with a real Laravel 11 app (48 migrations + seeders) |
 
 **Real-machine validation (2026-11-10, macOS 26.6.2 arm64, another local PHP tool running alongside):**
