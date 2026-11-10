@@ -25,6 +25,8 @@ struct AppState {
     paths: Paths,
     /// Present while the app's own engine is running; sending stops it.
     engine: Mutex<Option<oneshot::Sender<()>>>,
+    /// Public tunnels by site name. Dropping one stops cloudflared.
+    shares: Mutex<std::collections::HashMap<String, corral_engine::share::Share>>,
 }
 
 #[derive(Serialize)]
@@ -79,6 +81,9 @@ struct Overview {
     http_port: u16,
     https_port: u16,
     system: corral_system::Status,
+    adminer: bool,
+    /// (site, public url) for active shares.
+    shares: Vec<(String, String)>,
 }
 
 fn home() -> std::path::PathBuf {
@@ -145,6 +150,17 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         http_port: cfg.http_port,
         https_port: cfg.https_port,
         system: corral_system::status(paths, &cfg),
+        adminer: corral_engine::adminer::installed(paths),
+        shares: {
+            let mut m = state.shares.lock().unwrap();
+            m.retain(|_, sh| sh.alive());
+            let mut v: Vec<(String, String)> = m
+                .iter()
+                .map(|(k, sh)| (k.clone(), sh.url.clone()))
+                .collect();
+            v.sort();
+            v
+        },
     })
 }
 
@@ -350,7 +366,10 @@ async fn install_component(
                 cfg.save(&paths).map_err(err)?;
             }
         }
-        "mysql" | "valkey" | "postgres" => {
+        "adminer" => {
+            corral_engine::adminer::install(&paths).await.map_err(err)?;
+        }
+        "mysql" | "valkey" | "postgres" | "mongodb" => {
             let kind = corral_services::manifest::Kind::parse(&what).ok_or("unknown service")?;
             corral_services::add(&paths, kind, version.as_deref(), None, None)
                 .await
@@ -674,6 +693,8 @@ struct ProjectInfo {
     laravel: bool,
     watchers: bool,
     db: Option<corral_engine::project::EnvDb>,
+    processes: Vec<&'static str>,
+    reverb_available: bool,
 }
 
 #[tauri::command]
@@ -683,7 +704,84 @@ fn project_info(state: State<'_, AppState>, site: String) -> CmdResult<ProjectIn
         laravel: corral_engine::project::is_laravel(&path),
         watchers: corral_engine::project::watchers_enabled(&path),
         db: corral_engine::project::env_db(&state.paths, &path).map_err(err)?,
+        processes: {
+            let cfg = Config::load(&state.paths).map_err(err)?;
+            Registry::load(&state.paths)
+                .map_err(err)?
+                .resolve(&cfg)
+                .map_err(err)?
+                .into_iter()
+                .find(|s| s.name == site)
+                .map(|s| s.processes.iter().map(|p| p.as_str()).collect())
+                .unwrap_or_default()
+        },
+        reverb_available: path.join("vendor/laravel/reverb").is_dir(),
     })
+}
+
+#[tauri::command]
+fn set_site_process(
+    state: State<'_, AppState>,
+    site: String,
+    kind: String,
+    on: bool,
+) -> CmdResult<()> {
+    let p = corral_core::sites::Process::parse(&kind).ok_or("unknown process")?;
+    let cfg = Config::load(&state.paths).map_err(err)?;
+    let mut reg = Registry::load(&state.paths).map_err(err)?;
+    reg.set_process(&cfg, &site, p, on).map_err(err)?;
+    reg.save().map_err(err)
+}
+
+#[tauri::command]
+fn adminer_remove(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Overview> {
+    corral_engine::adminer::remove(&state.paths).map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+/// Start a public tunnel for a site (installing cloudflared on first use).
+#[tauri::command]
+async fn share_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site: String,
+) -> CmdResult<Overview> {
+    let paths = state.paths.clone();
+    if !running(&app) && !orphans::engine_running(&paths) {
+        return Err("Start Corral first.".into());
+    }
+    let cfg = Config::load(&paths).map_err(err)?;
+    let s = Registry::load(&paths)
+        .map_err(err)?
+        .resolve(&cfg)
+        .map_err(err)?
+        .into_iter()
+        .find(|x| x.name == site)
+        .ok_or("no such site")?;
+    if !corral_engine::share::bin(&paths).exists() {
+        corral_engine::share::install(&paths).await.map_err(err)?;
+    }
+    let share = corral_engine::share::start(&paths, &cfg, &s)
+        .await
+        .map_err(err)?;
+    if let Some(old) = state.shares.lock().unwrap().insert(site, share) {
+        drop(old); // kill_on_drop stops a previous tunnel
+    }
+    ov!(app, state)
+}
+
+#[tauri::command]
+async fn share_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site: String,
+) -> CmdResult<Overview> {
+    let old = state.shares.lock().unwrap().remove(&site);
+    if let Some(sh) = old {
+        sh.stop().await;
+    }
+    ov!(app, state)
 }
 
 #[tauri::command]
@@ -895,6 +993,7 @@ pub fn run() {
         .manage(AppState {
             paths,
             engine: Mutex::new(None),
+            shares: Mutex::new(Default::default()),
         })
         .setup(|app| {
             build_tray(app)?;
@@ -969,6 +1068,10 @@ pub fn run() {
             set_watchers,
             create_database,
             uninstall_corral,
+            set_site_process,
+            adminer_remove,
+            share_start,
+            share_stop,
             site_logs
         ])
         .build(tauri::generate_context!())
@@ -997,6 +1100,8 @@ pub fn run() {
             // async runtime keeps running on its own threads meanwhile.
             tauri::RunEvent::Exit => {
                 let state = app.state::<AppState>();
+                // Close public tunnels (kill_on_drop) before anything else.
+                state.shares.lock().unwrap().clear();
                 if running(app) {
                     stop_engine_inner(app, &state);
                     for _ in 0..240 {

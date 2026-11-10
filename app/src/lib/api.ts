@@ -44,6 +44,8 @@ export interface Overview {
   http_port: number;
   https_port: number;
   system: SystemStatus;
+  adminer: boolean;
+  shares: [string, string][];
 }
 
 export interface SystemStatus {
@@ -67,6 +69,8 @@ export interface ProjectInfo {
   laravel: boolean;
   watchers: boolean;
   db: EnvDb | null;
+  processes: string[];
+  reverb_available: boolean;
 }
 
 export interface MailSummary {
@@ -132,7 +136,7 @@ export const api = {
   setDefaultPhp: (version: string) => invoke<Overview>("set_default_php", { version }),
   start: () => invoke<Overview>("start_engine"),
   stop: () => invoke<Overview>("stop_engine"),
-  install: (what: "web" | "php" | "mysql" | "valkey" | "postgres", version?: string) =>
+  install: (what: "web" | "php" | "mysql" | "valkey" | "postgres" | "mongodb" | "adminer", version?: string) =>
     invoke<Overview>("install_component", { what, version }),
   setServiceEnabled: (name: string, enabled: boolean) =>
     invoke<Overview>("set_service_enabled", { name, enabled }),
@@ -162,6 +166,11 @@ export const api = {
   setWatchers: (site: string, enable: boolean) => invoke<void>("set_watchers", { site, enable }),
   createDatabase: (site: string, dedicatedUser?: string) =>
     invoke<string>("create_database", { site, dedicatedUser }),
+  setSiteProcess: (site: string, kind: string, on: boolean) =>
+    invoke<void>("set_site_process", { site, kind, on }),
+  adminerRemove: () => invoke<Overview>("adminer_remove"),
+  shareStart: (site: string) => invoke<Overview>("share_start", { site }),
+  shareStop: (site: string) => invoke<Overview>("share_stop", { site }),
   uninstall: (deleteData: boolean) => invoke<void>("uninstall_corral", { deleteData }),
   eventsList: () => invoke<WatchEvent[]>("events_list", {}),
   eventsClear: () => invoke<void>("events_clear"),

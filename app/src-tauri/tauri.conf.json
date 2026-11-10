@@ -13,8 +13,12 @@
     "windows": [
       {
         "title": "Corral",
-        "width": 980,
-        "height": 640
+        "width": 1080,
+        "height": 720,
+        "minWidth": 840,
+        "minHeight": 540,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

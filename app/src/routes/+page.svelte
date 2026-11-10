@@ -120,6 +120,17 @@
     });
   }
 
+  async function setProcess(name: string, kind: string, on: boolean) {
+    await act("proc", async () => {
+      await api.setSiteProcess(name, kind, on);
+      project = await api.projectInfo(name);
+    });
+  }
+
+  const shareUrl = $derived(
+    site && data ? (data.shares.find(([n]) => n === site.name)?.[1] ?? null) : null,
+  );
+
   async function createDb(name: string, dedicated: boolean) {
     await act("db", async () => {
       notice = await api.createDatabase(name, dedicated ? dbUser : undefined);
@@ -437,6 +448,18 @@
                   {busy === "watch" ? "Working…" : project.watchers ? "On" : "Off"}
                 </label>
               </li>
+              {#each [["queue", "Queue worker", "php artisan queue:work"], ["schedule", "Scheduler", "php artisan schedule:work"], ["reverb", "Reverb", "WebSocket server on 127.0.0.1"]] as [kind, label, hint] (kind)}
+                {#if kind !== "reverb" || project.reverb_available}
+                  <li>
+                    <div><strong>{label}</strong><small>{hint}. Runs while Corral runs and restarts if it crashes.</small></div>
+                    <label class="toggle">
+                      <input type="checkbox" checked={project.processes.includes(kind)} disabled={!!busy}
+                        onchange={(e) => setProcess(site.name, kind, e.currentTarget.checked)} />
+                      {project.processes.includes(kind) ? "On" : "Off"}
+                    </label>
+                  </li>
+                {/if}
+              {/each}
               {#if project.db && ["mysql", "mariadb", "pgsql"].includes(project.db.connection)}
                 <li>
                   <div>
@@ -456,6 +479,23 @@
             </ul>
           </section>
         {/if}
+
+        <section>
+          <h2>Share</h2>
+          {#if shareUrl}
+            <p>Public at <button class="link mono" onclick={() => openUrl(shareUrl!)}>{shareUrl}</button></p>
+            <p class="warn">Anyone with this link can open the site until you stop sharing.</p>
+            <div class="buttons">
+              <button class="btn" onclick={() => navigator.clipboard.writeText(shareUrl!)}>Copy link</button>
+              <button class="btn danger" disabled={!!busy} onclick={() => run("share", () => api.shareStop(site.name))}>Stop sharing</button>
+            </div>
+          {:else}
+            <p class="empty">Get a temporary public https link (Cloudflare quick tunnel, no account needed). Links your app builds from APP_URL still point to .{data?.tld}.</p>
+            <button class="btn" disabled={!!busy || !(data?.running || data?.running_elsewhere)} onclick={() => run("share", () => api.shareStart(site.name))}>
+              {busy === "share" ? "Opening tunnel…" : "Share publicly"}
+            </button>
+          {/if}
+        </section>
 
         <section>
           <h2>Environment (.env)</h2>
@@ -642,6 +682,12 @@
               {busy === "postgres" ? "Building PostgreSQL (a few minutes)…" : "Add PostgreSQL 18"}
             </button>
           {/if}
+          {#if !data.services.some((s) => s.kind === "mongodb")}
+            <button class="btn" disabled={!!busy} onclick={() => run("mongodb", () => api.install("mongodb"))}
+              title="SSPL licensed; downloaded from MongoDB">
+              {busy === "mongodb" ? "Installing MongoDB…" : "Add MongoDB 8.2"}
+            </button>
+          {/if}
           {#if !data.services.some((s) => s.kind === "valkey")}
             <button class="btn" disabled={!!busy} onclick={() => run("valkey", () => api.install("valkey"))}
               title="Redis-compatible; built from verified source; needs Xcode command line tools">
@@ -649,6 +695,22 @@
             </button>
           {/if}
         </div>
+        <h2>Database GUI</h2>
+        <ul class="list">
+          <li>
+            <div><strong>Adminer</strong><small>Browse and edit MySQL, PostgreSQL and SQLite at https://adminer.{data.tld}. Only reachable from this Mac.</small></div>
+            {#if data.adminer}
+              <span class="row">
+                <button class="btn small primary" onclick={() => openUrl(`https://adminer.${data!.tld}${data!.https_port === 443 ? "" : ":" + data!.https_port}`)}>Open</button>
+                <button class="btn small" disabled={!!busy} onclick={() => run("adminer", api.adminerRemove)}>Remove</button>
+              </span>
+            {:else}
+              <button class="btn small" disabled={!!busy} onclick={() => run("adminer", () => api.install("adminer"))}>
+                {busy === "adminer" ? "Installing…" : "Install"}
+              </button>
+            {/if}
+          </li>
+        </ul>
         {#if !data.running && !data.running_elsewhere && data.services.length}
           <p class="empty">Services start together with Corral.</p>
         {/if}
