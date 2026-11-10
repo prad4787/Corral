@@ -13,6 +13,7 @@ corral-tls.workspace = true
 corral-proxy.workspace = true
 corral-supervisor.workspace = true
 corral-fetch.workspace = true
+corral-services.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

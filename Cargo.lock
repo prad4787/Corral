@@ -744,6 +744,7 @@ dependencies = [
  "corral-core",
  "corral-dns",
  "corral-engine",
+ "corral-services",
  "corral-tls",
  "serde_json",
  "tempfile",
@@ -785,6 +786,7 @@ dependencies = [
  "corral-dns",
  "corral-fetch",
  "corral-proxy",
+ "corral-services",
  "corral-supervisor",
  "corral-tls",
  "libc",
@@ -819,6 +821,22 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "corral-services"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "corral-core",
+ "corral-fetch",
+ "corral-supervisor",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

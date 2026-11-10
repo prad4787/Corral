@@ -1,0 +1,21 @@
+[package]
+name = "corral-services"
+description = "Databases and other background services for Corral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+corral-core.workspace = true
+corral-fetch.workspace = true
+corral-supervisor.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

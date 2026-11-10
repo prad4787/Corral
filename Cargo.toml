@@ -18,6 +18,7 @@ corral-proxy = { path = "crates/corral-proxy" }
 corral-supervisor = { path = "crates/corral-supervisor" }
 corral-engine = { path = "crates/corral-engine" }
 corral-fetch = { path = "crates/corral-fetch" }
+corral-services = { path = "crates/corral-services" }
 
 
 anyhow = "1"

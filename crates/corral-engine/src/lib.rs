@@ -143,11 +143,15 @@ fn caddy_spec(paths: &Paths) -> Spec {
 
 fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
     let parked = Config::load(paths).map(|c| c.parked).unwrap_or_default();
-    [paths.config_file(), paths.sites_file()]
-        .into_iter()
-        .chain(parked)
-        .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .collect()
+    [
+        paths.config_file(),
+        paths.sites_file(),
+        corral_services::store::services_file(paths),
+    ]
+    .into_iter()
+    .chain(parked)
+    .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+    .collect()
 }
 
 /// Restart running pools for `versions` (their config changed).
@@ -241,6 +245,9 @@ pub async fn run(
     let sup = Supervisor::new();
     sync_fpm(&paths, &sup, &rendered.fpm_versions).await?;
     sup.start(caddy_spec(&paths)).await?;
+    if let Err(e) = corral_services::sync(&paths, &sup).await {
+        tracing::error!(error = %e, "service sync failed");
+    }
 
     let watcher = {
         let paths = paths.clone();
@@ -278,6 +285,9 @@ pub async fn run(
                         }
                         if let Err(e) = restart_fpm(&paths, &sup, &r.changed_php).await {
                             tracing::error!(error = %e, "fpm restart failed");
+                        }
+                        if let Err(e) = corral_services::sync(&paths, &sup).await {
+                            tracing::error!(error = %e, "service sync failed");
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "render failed"),
