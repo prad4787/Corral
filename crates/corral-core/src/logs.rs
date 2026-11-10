@@ -57,7 +57,7 @@ pub fn log_files(project: &Path) -> Vec<PathBuf> {
             .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
             .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
             .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|x| std::cmp::Reverse(x.0));
     files.into_iter().map(|(_, p)| p).collect()
 }
 

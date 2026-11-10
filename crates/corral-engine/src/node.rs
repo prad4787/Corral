@@ -131,7 +131,7 @@ pub fn installed(paths: &Paths) -> Vec<(u32, String)> {
             Some((m, ver.trim().to_string()))
         })
         .collect();
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
     v
 }
 

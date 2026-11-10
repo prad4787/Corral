@@ -203,7 +203,7 @@ fn not_found_route() -> Value {
 /// Build the complete Caddy JSON document.
 pub fn caddy_config(settings: &ProxySettings, sites: &[ProxySite]) -> Value {
     let mut sites: Vec<&ProxySite> = sites.iter().collect();
-    sites.sort_by(|a, b| a.host.cmp(&b.host));
+    sites.sort_by(|a, b| a.host.cmp(&b.host)); // by reference: no clone
 
     let redirect_port = if settings.public_https_port == 443 {
         String::new()

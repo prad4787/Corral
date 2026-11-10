@@ -85,7 +85,7 @@ pub fn installed(paths: &Paths) -> std::io::Result<Vec<Installation>> {
             out.push(inst);
         }
     }
-    out.sort_by(|a, b| b.version.cmp(&a.version));
+    out.sort_by_key(|i| std::cmp::Reverse(i.version));
     Ok(out)
 }
 
