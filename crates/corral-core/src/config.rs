@@ -27,6 +27,8 @@ pub struct Config {
     pub parked: Vec<PathBuf>,
     /// Serve every site over HTTPS by default.
     pub secure_by_default: bool,
+    /// Default Node.js major version for the `node`/`npm` shims.
+    pub default_node: Option<u32>,
 }
 
 impl Default for Config {
@@ -42,6 +44,7 @@ impl Default for Config {
             default_php: None,
             parked: Vec::new(),
             secure_by_default: true,
+            default_node: None,
         }
     }
 }

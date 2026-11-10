@@ -103,6 +103,19 @@ enum Cmd {
         #[arg(long)]
         delete_data: bool,
     },
+    /// Manage Node.js versions.
+    #[command(subcommand)]
+    Node(NodeCmd),
+    /// Create a new Laravel project in your first parked folder.
+    New {
+        name: String,
+        /// none, react, vue or livewire
+        #[arg(long, default_value = "none")]
+        kit: String,
+        /// Parent folder (default: first parked folder).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Manage databases and other background services.
     #[command(subcommand)]
     Service(ServiceCmd),
@@ -214,6 +227,29 @@ fn set_dotenv_value(file: &std::path::Path, key: &str, value: &str) -> anyhow::R
 }
 
 #[derive(Subcommand)]
+enum NodeCmd {
+    /// List installed versions.
+    List,
+    /// Install a major version (default: newest LTS), verified via SHASUMS256.
+    Install { major: Option<u32> },
+    /// Make a major version the default for node/npm/npx.
+    Use { major: u32 },
+    /// Remove a major version.
+    Remove { major: u32 },
+}
+
+/// Map a starter-kit name to its Composer package.
+fn starter_kit(kit: &str) -> Option<&'static str> {
+    Some(match kit {
+        "none" | "" => "laravel/laravel",
+        "react" => "laravel/react-starter-kit",
+        "vue" => "laravel/vue-starter-kit",
+        "livewire" => "laravel/livewire-starter-kit",
+        _ => return None,
+    })
+}
+
+#[derive(Subcommand)]
 enum PhpCmd {
     /// List installed versions.
     List,
@@ -226,6 +262,13 @@ enum PhpCmd {
     },
     /// Remove an installed version.
     Remove { version: String },
+    /// Show or change php.ini overrides for a version (90-user.ini).
+    /// Examples: `corral php ini 8.4`, `corral php ini 8.4 memory_limit=1G`,
+    /// `corral php ini 8.4 memory_limit=` (removes the override).
+    Ini {
+        version: String,
+        settings: Vec<String>,
+    },
 }
 
 fn cwd() -> anyhow::Result<PathBuf> {
@@ -461,6 +504,131 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             corral_engine::render(&paths)?;
             println!("Installed PHP {full}");
+        }
+        Cmd::Php(PhpCmd::Ini { version, settings }) => {
+            let v = parse_php(&version)?;
+            let inst =
+                php::find(&paths, v)?.with_context(|| format!("PHP {v} is not installed"))?;
+            for kv in &settings {
+                let (k, val) = kv
+                    .split_once('=')
+                    .with_context(|| format!("expected key=value, got {kv:?}"))?;
+                let val = val.trim();
+                php::set_user_ini(&inst, k.trim(), (!val.is_empty()).then_some(val))?;
+            }
+            let file = php::user_ini(&inst);
+            println!("# {}", file.display());
+            match std::fs::read_to_string(&file) {
+                Ok(s) => print!("{s}"),
+                Err(_) => println!("; no overrides yet"),
+            }
+            if !settings.is_empty() {
+                println!("# A running Corral restarts PHP {v} within ~1s.");
+            }
+        }
+        Cmd::Node(NodeCmd::List) => {
+            let inst = corral_engine::node::installed(&paths);
+            if inst.is_empty() {
+                println!("No Node versions installed. Try `corral node install` (newest LTS).");
+            }
+            for (m, ver) in inst {
+                let mark = if cfg.default_node == Some(m) {
+                    "*"
+                } else {
+                    " "
+                };
+                println!("{mark} {m}  {ver}");
+            }
+        }
+        Cmd::Node(NodeCmd::Install { major }) => {
+            let (m, ver) = corral_engine::node::install(&paths, major).await?;
+            if cfg.default_node.is_none() {
+                cfg.default_node = Some(m);
+                cfg.save(&paths)?;
+            }
+            corral_engine::node::write_shims(&paths, cfg.default_node)?;
+            println!("Installed Node {ver} (verified against SHASUMS256.txt)");
+        }
+        Cmd::Node(NodeCmd::Use { major }) => {
+            corral_engine::node::write_shims(&paths, Some(major))?;
+            cfg.default_node = Some(major);
+            cfg.save(&paths)?;
+            println!("Default Node is now {major}");
+        }
+        Cmd::Node(NodeCmd::Remove { major }) => {
+            corral_engine::node::remove(&paths, major)?;
+            if cfg.default_node == Some(major) {
+                cfg.default_node = corral_engine::node::installed(&paths)
+                    .first()
+                    .map(|(m, _)| *m);
+                cfg.save(&paths)?;
+            }
+            corral_engine::node::write_shims(&paths, cfg.default_node)?;
+            println!("Removed Node {major}");
+        }
+        Cmd::New { name, kit, path } => {
+            let package = starter_kit(&kit).with_context(|| {
+                format!("unknown kit {kit:?}: use none, react, vue or livewire")
+            })?;
+            let slug = corral_core::sites::slugify(&name)
+                .filter(|s| s == &name)
+                .with_context(|| {
+                    format!("project name {name:?} must be lowercase letters, digits and '-'")
+                })?;
+            let parent =
+                match path {
+                    Some(p) => p,
+                    None => cfg.parked.first().cloned().context(
+                        "no parked folder; pass --path or run `corral park <dir>` first",
+                    )?,
+                };
+            let dir = parent.join(&slug);
+            anyhow::ensure!(!dir.exists(), "{} already exists", dir.display());
+            anyhow::ensure!(
+                install::composer_phar(&paths).exists(),
+                "Composer missing: run `corral composer`"
+            );
+            anyhow::ensure!(
+                paths.bin.join("php").exists(),
+                "no PHP installed: run `corral php install 8.4`"
+            );
+            println!("Creating {} from {package}…", dir.display());
+            let status = tokio::process::Command::new(paths.bin.join("composer"))
+                .args(["create-project", package])
+                .arg(&dir)
+                .args(["--no-interaction", "--prefer-dist"])
+                // Composer scripts call `php`; make sure it is Corral's.
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        paths.bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .status()
+                .await?;
+            anyhow::ensure!(
+                status.success(),
+                "composer create-project failed ({status})"
+            );
+            if !cfg.parked.contains(&parent) {
+                let mut reg = Registry::load(&paths)?;
+                reg.link(&dir, Some(&slug))?;
+                reg.save()?;
+            }
+            let site = Registry::load(&paths)?
+                .resolve(&cfg)?
+                .into_iter()
+                .find(|s| s.name == slug)
+                .context("new project was not picked up as a site")?;
+            println!("\nReady: {}", site.url(&cfg));
+            if kit != "none" {
+                println!(
+                    "Front-end assets: cd {} && npm install && npm run build",
+                    dir.display()
+                );
+            }
         }
         Cmd::Php(PhpCmd::Remove { version }) => {
             let v = parse_php(&version)?;

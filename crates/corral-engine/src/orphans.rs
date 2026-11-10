@@ -127,7 +127,14 @@ mod tests {
         assert!(EngineLock::acquire(&p).is_err());
         assert!(engine_running(&p));
         drop(a);
-        assert!(EngineLock::acquire(&p).is_ok());
+        // A process being spawned concurrently by another test can hold a
+        // copy of the fd between fork and exec (CLOEXEC closes it at exec),
+        // so allow a brief window for the lock to be released.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while EngineLock::acquire(&p).is_err() {
+            assert!(std::time::Instant::now() < deadline, "lock never released");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

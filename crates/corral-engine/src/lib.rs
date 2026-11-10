@@ -6,6 +6,7 @@
 //! whenever `config.toml` or `sites.toml` change.
 
 pub mod install;
+pub mod node;
 pub mod orphans;
 
 use anyhow::Context;
@@ -154,6 +155,33 @@ fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
     .collect()
 }
 
+/// Per installed PHP version: (file name, mtime, size) of every conf.d entry.
+fn user_ini_fingerprints(
+    paths: &Paths,
+) -> std::collections::BTreeMap<String, Vec<(String, Option<SystemTime>, u64)>> {
+    php::installed(paths)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|inst| {
+            let mut files: Vec<_> = std::fs::read_dir(inst.conf_d())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| {
+                    let m = e.metadata().ok();
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        m.as_ref().and_then(|m| m.modified().ok()),
+                        m.map_or(0, |m| m.len()),
+                    )
+                })
+                .collect();
+            files.sort();
+            (inst.version.to_string(), files)
+        })
+        .collect()
+}
+
 /// Restart running pools for `versions` (their config changed).
 async fn restart_fpm(paths: &Paths, sup: &Supervisor, versions: &[String]) -> anyhow::Result<()> {
     for v in versions {
@@ -254,6 +282,7 @@ pub async fn run(
         let sup = sup.clone();
         async move {
             let mut last = mtimes(&paths);
+            let mut last_user_ini = user_ini_fingerprints(&paths);
             let mut last_pids = Vec::new();
             loop {
                 let pids: Vec<u32> = sup
@@ -272,6 +301,19 @@ pub async fn run(
                     last_pids = pids;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                // User php.ini overrides (conf.d) only need their pool restarted.
+                let user_ini = user_ini_fingerprints(&paths);
+                if user_ini != last_user_ini {
+                    let changed: Vec<String> = user_ini
+                        .iter()
+                        .filter(|(v, fp)| last_user_ini.get(*v) != Some(fp))
+                        .map(|(v, _)| v.clone())
+                        .collect();
+                    last_user_ini = user_ini;
+                    if let Err(e) = restart_fpm(&paths, &sup, &changed).await {
+                        tracing::error!(error = %e, "fpm restart failed");
+                    }
+                }
                 let now = mtimes(&paths);
                 if now == last {
                     continue;

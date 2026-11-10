@@ -161,6 +161,46 @@ pub fn write_configs(paths: &Paths, inst: &Installation) -> std::io::Result<bool
     Ok(ini || fpm)
 }
 
+/// The user-editable override file for a version (created on demand).
+pub fn user_ini(inst: &Installation) -> std::path::PathBuf {
+    inst.conf_d().join("90-user.ini")
+}
+
+/// Set (or with `None`, remove) one `key = value` in the user override file.
+pub fn set_user_ini(inst: &Installation, key: &str, value: Option<&str>) -> std::io::Result<()> {
+    let valid = !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_');
+    if !valid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid ini key {key:?}"),
+        ));
+    }
+    if value.is_some_and(|v| v.contains('\n')) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ini values must be a single line",
+        ));
+    }
+    let path = user_ini(inst);
+    let old = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| "; Your PHP overrides. Corral never rewrites other lines.\n".into());
+    let mut lines: Vec<String> = old
+        .lines()
+        .filter(|l| l.split('=').next().map(str::trim) != Some(key))
+        .map(str::to_owned)
+        .collect();
+    if let Some(v) = value {
+        lines.push(format!("{key} = {v}"));
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::create_dir_all(inst.conf_d())?;
+    write_atomic(&path, body.as_bytes())
+}
+
 /// Command-line arguments to run FPM in the foreground under the supervisor.
 pub fn fpm_args(inst: &Installation) -> Vec<String> {
     vec![
@@ -242,6 +282,27 @@ pub(crate) mod tests {
             version: PhpVersion::parse(v).unwrap(),
             dir,
         }
+    }
+
+    #[test]
+    fn user_ini_set_replace_remove() {
+        let t = tempfile::tempdir().unwrap();
+        let p = Paths::at(t.path());
+        let i = fake_install(&p, "8.4");
+        set_user_ini(&i, "memory_limit", Some("1G")).unwrap();
+        set_user_ini(&i, "xdebug.mode", Some("debug")).unwrap();
+        set_user_ini(&i, "memory_limit", Some("2G")).unwrap();
+        let s = std::fs::read_to_string(user_ini(&i)).unwrap();
+        assert_eq!(s.matches("memory_limit").count(), 1);
+        assert!(s.contains("memory_limit = 2G") && s.contains("xdebug.mode = debug"));
+        set_user_ini(&i, "memory_limit", None).unwrap();
+        assert!(
+            !std::fs::read_to_string(user_ini(&i))
+                .unwrap()
+                .contains("memory_limit")
+        );
+        assert!(set_user_ini(&i, "bad key", Some("1")).is_err());
+        assert!(set_user_ini(&i, "k", Some("a\nevil=1")).is_err());
     }
 
     #[test]
