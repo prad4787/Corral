@@ -167,7 +167,7 @@ pub async fn create_db_from_env(
     match kind {
         Kind::Mysql => corral_services::mysql::create_database(paths, &service, inst, &db).await?,
         Kind::Postgres => corral_services::postgres::create_database(paths, inst, &db).await?,
-        Kind::Valkey => unreachable!(),
+        Kind::Valkey | Kind::Mongodb => unreachable!(),
     }
     let mut msg = format!(
         "Database `{db}` is ready on {service} (127.0.0.1:{}).",
@@ -187,7 +187,7 @@ pub async fn create_db_from_env(
                 corral_services::postgres::ensure_app_user(paths, inst, &db, &user, &password)
                     .await?
             }
-            Kind::Valkey => unreachable!(),
+            Kind::Valkey | Kind::Mongodb => unreachable!(),
         }
         msg.push_str(&format!(
             " User `{user}` can use it with the password from .env."

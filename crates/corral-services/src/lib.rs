@@ -4,6 +4,7 @@
 //! `services/data/<name>/`.
 
 pub mod manifest;
+pub mod mongodb;
 pub mod mysql;
 pub mod postgres;
 pub mod store;
@@ -125,6 +126,7 @@ pub async fn prepare(paths: &Paths, name: &str, inst: &Instance) -> anyhow::Resu
         Kind::Mysql => mysql::ensure_initialized(paths, name, inst).await,
         Kind::Valkey => valkey::prepare(paths, name, inst),
         Kind::Postgres => postgres::ensure_initialized(paths, name, inst).await,
+        Kind::Mongodb => mongodb::prepare(paths, name),
     }
 }
 
@@ -133,6 +135,7 @@ async fn after_start(paths: &Paths, name: &str, inst: &Instance) -> anyhow::Resu
         Kind::Mysql => mysql::ensure_dev_accounts(paths, name, inst).await,
         Kind::Valkey => Ok(()),
         Kind::Postgres => postgres::ensure_dev_roles(paths, inst).await,
+        Kind::Mongodb => Ok(()),
     }
 }
 
@@ -141,6 +144,7 @@ fn spec(paths: &Paths, name: &str, inst: &Instance) -> corral_supervisor::Spec {
         Kind::Mysql => mysql::spec(paths, name, inst),
         Kind::Valkey => valkey::spec(paths, name, inst),
         Kind::Postgres => postgres::spec(paths, name, inst),
+        Kind::Mongodb => mongodb::spec(paths, name, inst),
     }
 }
 
@@ -187,7 +191,7 @@ pub async fn sync(paths: &Paths, sup: &Supervisor) -> anyhow::Result<()> {
         let changed = match inst.kind {
             Kind::Mysql => mysql::write_option_file(paths, name, inst)?,
             Kind::Valkey => valkey::write_config(paths, name, inst)?,
-            Kind::Postgres => false, // configured with command-line flags
+            Kind::Postgres | Kind::Mongodb => false, // configured with command-line flags
         };
         let state = sup.state(&store::unit(name)).await;
         let healthy = matches!(

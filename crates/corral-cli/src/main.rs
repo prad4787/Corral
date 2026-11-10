@@ -163,6 +163,25 @@ enum Cmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Share a site on a public https://…trycloudflare.com URL until Ctrl-C.
+    Share {
+        #[arg(long)]
+        site: Option<String>,
+    },
+    /// Built-in Adminer database GUI at https://adminer.<tld>.
+    Adminer {
+        /// install or remove
+        action: String,
+    },
+    /// Background processes for a Laravel site: queue, schedule or reverb.
+    Process {
+        /// queue, schedule or reverb
+        kind: String,
+        /// on or off
+        state: String,
+        #[arg(long)]
+        site: Option<String>,
+    },
     /// Show mail caught by Corral (SMTP on 127.0.0.1:2525).
     #[command(subcommand)]
     Mail(MailCmd),
@@ -734,6 +753,63 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Share { site } => {
+            let name = site_name(&paths, &cfg, site)?;
+            let s = Registry::load(&paths)?
+                .resolve(&cfg)?
+                .into_iter()
+                .find(|x| x.name == name)
+                .with_context(|| format!("no site named {name:?}"))?;
+            anyhow::ensure!(
+                corral_engine::orphans::engine_running(&paths),
+                "Corral is not running; start it first"
+            );
+            if !corral_engine::share::bin(&paths).exists() {
+                println!("Installing cloudflared (verified against GitHub's SHA-256)…");
+                corral_engine::share::install(&paths).await?;
+            }
+            let share = corral_engine::share::start(&paths, &cfg, &s).await?;
+            println!("{} is public at {}", s.host, share.url);
+            println!("Anyone with the link can open it. Press Ctrl-C to stop sharing.");
+            let _ = tokio::signal::ctrl_c().await;
+            share.stop().await;
+            println!("Stopped sharing {}", s.host);
+        }
+        Cmd::Adminer { action } => match action.as_str() {
+            "install" => {
+                let v = corral_engine::adminer::install(&paths).await?;
+                corral_engine::render(&paths)?;
+                println!(
+                    "Adminer {v} at https://adminer.{} (127.0.0.1 only)",
+                    cfg.tld
+                );
+            }
+            "remove" => {
+                corral_engine::adminer::remove(&paths)?;
+                corral_engine::render(&paths)?;
+                println!("Adminer removed");
+            }
+            other => bail!("unknown action {other:?}: use install or remove"),
+        },
+        Cmd::Process { kind, state, site } => {
+            let p = corral_core::sites::Process::parse(&kind).with_context(|| {
+                format!("unknown process {kind:?}: use queue, schedule or reverb")
+            })?;
+            let on = match state.as_str() {
+                "on" => true,
+                "off" => false,
+                other => bail!("unknown state {other:?}: use on or off"),
+            };
+            let name = site_name(&paths, &cfg, site)?;
+            let mut reg = Registry::load(&paths)?;
+            reg.set_process(&cfg, &name, p, on)?;
+            reg.save()?;
+            println!(
+                "{} {} for {name} (a running Corral applies it within ~1s)",
+                p.as_str(),
+                if on { "on" } else { "off" }
+            );
         }
         Cmd::Mail(cmd) => {
             let store = corral_mail::Store::new(corral_mail::store_dir(&paths.root));

@@ -22,6 +22,35 @@ pub struct SiteEntry {
     pub php: Option<String>,
     /// Override the global HTTPS default.
     pub secure: Option<bool>,
+    /// Background processes Corral runs for this site.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<Process>,
+}
+
+/// A long-running `php artisan …` process supervised for a site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Process {
+    /// `queue:work`
+    Queue,
+    /// `schedule:work`
+    Schedule,
+    /// `reverb:start` (Laravel Reverb WebSocket server)
+    Reverb,
+}
+
+impl Process {
+    pub const ALL: [Process; 3] = [Process::Queue, Process::Schedule, Process::Reverb];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Schedule => "schedule",
+            Self::Reverb => "reverb",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.as_str() == s)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +79,7 @@ pub struct Site {
     pub php: Option<String>,
     pub isolated: bool,
     pub secure: bool,
+    pub processes: Vec<Process>,
 }
 
 impl Site {
@@ -183,6 +213,24 @@ impl<'a> Registry<'a> {
         Ok(())
     }
 
+    /// Turn a background process on or off for a site.
+    pub fn set_process(
+        &mut self,
+        cfg: &Config,
+        name: &str,
+        p: Process,
+        on: bool,
+    ) -> Result<(), SiteError> {
+        let e = self.entry_mut(cfg, name)?;
+        e.processes.retain(|x| *x != p);
+        if on {
+            e.processes.push(p);
+            e.processes.sort();
+        }
+        self.prune();
+        Ok(())
+    }
+
     pub fn set_secure(
         &mut self,
         cfg: &Config,
@@ -236,6 +284,7 @@ impl<'a> Registry<'a> {
                     secure: entry
                         .and_then(|e| e.secure)
                         .unwrap_or(cfg.secure_by_default),
+                    processes: entry.map(|e| e.processes.clone()).unwrap_or_default(),
                     name,
                     path,
                     origin,
@@ -324,6 +373,31 @@ mod tests {
             (shop.php.as_deref(), shop.isolated, shop.secure),
             (Some("8.4"), false, true)
         );
+    }
+
+    #[test]
+    fn processes_toggle_and_prune() {
+        let (_t, paths, cfg) = setup();
+        let mut reg = Registry::load(&paths).unwrap();
+        reg.set_process(&cfg, "blog", Process::Reverb, true)
+            .unwrap();
+        reg.set_process(&cfg, "blog", Process::Queue, true).unwrap();
+        reg.set_process(&cfg, "blog", Process::Queue, true).unwrap();
+        reg.save().unwrap();
+        let reg = Registry::load(&paths).unwrap();
+        let blog = reg
+            .resolve(&cfg)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "blog")
+            .unwrap();
+        assert_eq!(blog.processes, [Process::Queue, Process::Reverb]);
+        let mut reg = reg;
+        reg.set_process(&cfg, "blog", Process::Queue, false)
+            .unwrap();
+        reg.set_process(&cfg, "blog", Process::Reverb, false)
+            .unwrap();
+        assert!(reg.entries().sites.is_empty(), "empty entries are pruned");
     }
 
     #[test]

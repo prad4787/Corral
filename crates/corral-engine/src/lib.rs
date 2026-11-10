@@ -5,10 +5,12 @@
 //! starts DNS, one FPM pool per PHP version in use, and Caddy, then re-renders
 //! whenever `config.toml` or `sites.toml` change.
 
+pub mod adminer;
 pub mod install;
 pub mod node;
 pub mod orphans;
 pub mod project;
+pub mod share;
 pub mod uninstall;
 
 use anyhow::Context;
@@ -88,16 +90,39 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
         let f = ca.ensure_leaf(&s.host)?;
         leaves.insert(s.host.clone(), f);
     }
+    // Built-in Adminer site (unless a real site already uses the name).
+    let adminer_host = format!("adminer.{}", cfg.tld);
+    let adminer = (adminer::installed(paths)
+        && !versions.is_empty()
+        && !sites.iter().any(|s| s.host == adminer_host))
+    .then(|| -> anyhow::Result<corral_proxy::ProxySite> {
+        let f = ca.ensure_leaf(&adminer_host)?;
+        leaves.insert(adminer_host.clone(), f.clone());
+        Ok(corral_proxy::ProxySite {
+            host: adminer_host.clone(),
+            docroot: adminer::dir(paths),
+            front_controller: Some("index.php".into()),
+            fpm_socket: Some(paths.fpm_socket(&versions[0].to_string())),
+            debug_socket: None,
+            tls: Some(CertFiles {
+                cert: f.cert,
+                key: f.key,
+            }),
+        })
+    })
+    .transpose()?;
     let keep: Vec<&str> = leaves.keys().map(String::as_str).collect();
     ca.prune_leaves(&keep)?;
 
-    let proxy_sites = corral_proxy::proxy_sites(paths, &sites, &versions, &debuggable, |h| {
+    let mut proxy_sites = corral_proxy::proxy_sites(paths, &sites, &versions, &debuggable, |h| {
         let f = &leaves[h];
         CertFiles {
             cert: f.cert.clone(),
             key: f.key.clone(),
         }
     });
+    let adminer_fpm = adminer.as_ref().map(|_| versions[0].to_string());
+    proxy_sites.extend(adminer);
     let settings = ProxySettings::from_config(paths, &cfg);
     let caddy = corral_proxy::caddy_config(&settings, &proxy_sites);
     let caddy_path = caddy_config_path(paths);
@@ -106,7 +131,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
         serde_json::to_string_pretty(&caddy)?.as_bytes(),
     )?;
 
-    let mut fpm: BTreeSet<String> = BTreeSet::new();
+    let mut fpm: BTreeSet<String> = adminer_fpm.into_iter().collect();
     let mut missing = Vec::new();
     for (site, ps) in sites.iter().zip(&proxy_sites) {
         if let Some(sock) = &ps.fpm_socket {
@@ -289,6 +314,93 @@ async fn sync_fpm(paths: &Paths, sup: &Supervisor, want: &[String]) -> anyhow::R
     Ok(())
 }
 
+/// Specs for every enabled site process (`php artisan queue:work` etc.).
+/// The unit name includes the PHP version, so switching a site's PHP restarts it.
+pub fn process_specs(paths: &Paths, sites: &[Site]) -> anyhow::Result<Vec<Spec>> {
+    use corral_core::sites::Process;
+    let installs = php::installed(paths)?;
+    let mut out = Vec::new();
+    for site in sites.iter().filter(|s| !s.processes.is_empty()) {
+        if !site.path.join("artisan").is_file() {
+            continue;
+        }
+        let inst = site
+            .php
+            .as_deref()
+            .and_then(PhpVersion::parse)
+            .and_then(|v| installs.iter().find(|i| i.version == v))
+            .or(installs.first());
+        let Some(inst) = inst else { continue };
+        for p in &site.processes {
+            let cmd: Vec<String> = match p {
+                Process::Queue => vec!["queue:work".into(), "--sleep=1".into(), "--tries=3".into()],
+                Process::Schedule => vec!["schedule:work".into()],
+                Process::Reverb => {
+                    let port =
+                        corral_core::dotenv::value(&site.path.join(".env"), "REVERB_SERVER_PORT")
+                            .and_then(|p| p.parse::<u16>().ok())
+                            .unwrap_or(8080);
+                    vec![
+                        "reverb:start".into(),
+                        "--host=127.0.0.1".into(),
+                        format!("--port={port}"),
+                    ]
+                }
+            };
+            let mut args = vec![
+                "-c".to_string(),
+                inst.ini().display().to_string(),
+                "artisan".into(),
+            ];
+            args.extend(cmd);
+            let mut spec = Spec::new(
+                format!("proc-{}-{}-{}", site.name, p.as_str(), inst.version),
+                inst.cli(),
+                paths
+                    .logs_dir()
+                    .join(format!("site-{}-{}.log", site.name, p.as_str())),
+            )
+            .args(args);
+            spec.cwd = Some(site.path.clone());
+            spec.env = php::php_env(inst);
+            spec.env.push((
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", paths.bin.display()),
+            ));
+            // Workers can take a moment to finish the current job.
+            spec.stop_timeout = Duration::from_secs(30);
+            out.push(spec);
+        }
+    }
+    Ok(out)
+}
+
+/// Start/stop site processes to match the registry.
+async fn sync_processes(paths: &Paths, sup: &Supervisor, sites: &[Site]) -> anyhow::Result<()> {
+    let desired = process_specs(paths, sites)?;
+    let running: Vec<String> = sup
+        .states()
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .filter(|n| n.starts_with("proc-"))
+        .collect();
+    for name in running
+        .iter()
+        .filter(|n| !desired.iter().any(|s| &s.name == *n))
+    {
+        tracing::info!(process = %name, "stopping site process");
+        sup.stop(name).await.ok();
+    }
+    for spec in desired {
+        if !running.contains(&spec.name) {
+            tracing::info!(process = %spec.name, "starting site process");
+            sup.start(spec).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Run everything until `shutdown` resolves.
 pub async fn run(
     paths: Paths,
@@ -375,6 +487,10 @@ pub async fn run(
     if let Err(e) = corral_services::sync(&paths, &sup).await {
         tracing::error!(error = %e, "service sync failed");
     }
+    // After services: workers usually need the database/Redis up.
+    if let Err(e) = sync_processes(&paths, &sup, &rendered.sites).await {
+        tracing::error!(error = %e, "site process sync failed");
+    }
 
     let watcher = {
         let paths = paths.clone();
@@ -429,6 +545,9 @@ pub async fn run(
                         }
                         if let Err(e) = corral_services::sync(&paths, &sup).await {
                             tracing::error!(error = %e, "service sync failed");
+                        }
+                        if let Err(e) = sync_processes(&paths, &sup, &r.sites).await {
+                            tracing::error!(error = %e, "site process sync failed");
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "render failed"),
@@ -487,6 +606,46 @@ mod tests {
             }
         });
         assert!(wait_for_socket(&sock, Duration::from_secs(3)).await);
+    }
+
+    #[test]
+    fn process_specs_for_laravel_sites() {
+        use corral_core::sites::Process;
+        let t = tempfile::tempdir().unwrap();
+        let paths = Paths::at(t.path().join("corral"));
+        let sites_dir = t.path().join("Sites");
+        std::fs::create_dir_all(sites_dir.join("shop/public")).unwrap();
+        std::fs::write(sites_dir.join("shop/artisan"), "").unwrap();
+        std::fs::write(sites_dir.join("shop/.env"), "REVERB_SERVER_PORT=8090\n").unwrap();
+        std::fs::create_dir_all(sites_dir.join("plain")).unwrap();
+        fake_php(&paths, "8.4");
+        let cfg = Config {
+            parked: vec![sites_dir],
+            ..Default::default()
+        };
+        paths.ensure().unwrap();
+        cfg.save(&paths).unwrap();
+        let mut reg = Registry::load(&paths).unwrap();
+        reg.set_process(&cfg, "shop", Process::Queue, true).unwrap();
+        reg.set_process(&cfg, "shop", Process::Reverb, true)
+            .unwrap();
+        reg.set_process(&cfg, "plain", Process::Queue, true)
+            .unwrap();
+        reg.save().unwrap();
+        let sites = Registry::load(&paths).unwrap().resolve(&cfg).unwrap();
+        let specs = process_specs(&paths, &sites).unwrap();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["proc-shop-queue-8.4", "proc-shop-reverb-8.4"],
+            "non-Laravel sites are skipped"
+        );
+        assert!(specs[1].args.contains(&"--port=8090".to_string()));
+        assert!(specs[1].args.contains(&"--host=127.0.0.1".to_string()));
+        assert_eq!(
+            specs[0].cwd.as_deref(),
+            Some(t.path().join("Sites/shop").as_path())
+        );
     }
 
     #[test]

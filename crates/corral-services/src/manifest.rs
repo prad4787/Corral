@@ -13,6 +13,7 @@ pub enum Kind {
     Mysql,
     Valkey,
     Postgres,
+    Mongodb,
 }
 
 impl Kind {
@@ -22,6 +23,7 @@ impl Kind {
             // Valkey is the BSD-licensed Redis fork; `redis` is accepted as an alias.
             "valkey" | "redis" => Some(Self::Valkey),
             "postgres" | "postgresql" | "pgsql" => Some(Self::Postgres),
+            "mongodb" | "mongo" => Some(Self::Mongodb),
             _ => None,
         }
     }
@@ -30,6 +32,7 @@ impl Kind {
             Self::Mysql => "mysql",
             Self::Valkey => "valkey",
             Self::Postgres => "postgres",
+            Self::Mongodb => "mongodb",
         }
     }
     pub fn label(self) -> &'static str {
@@ -37,6 +40,7 @@ impl Kind {
             Self::Mysql => "MySQL",
             Self::Valkey => "Valkey (Redis-compatible)",
             Self::Postgres => "PostgreSQL",
+            Self::Mongodb => "MongoDB",
         }
     }
     pub fn default_port(self) -> u16 {
@@ -44,6 +48,7 @@ impl Kind {
             Self::Mysql => 3306,
             Self::Valkey => 6379,
             Self::Postgres => 5432,
+            Self::Mongodb => 27017,
         }
     }
     pub fn license(self) -> &'static str {
@@ -51,6 +56,9 @@ impl Kind {
             Self::Mysql => "GPL-2.0 (with FOSS exception), Oracle MySQL Community Server",
             Self::Valkey => "BSD-3-Clause, Valkey (Linux Foundation)",
             Self::Postgres => "PostgreSQL License (permissive, BSD-like)",
+            Self::Mongodb => {
+                "SSPL-1.0, MongoDB Community Server (downloaded from MongoDB, never bundled)"
+            }
         }
     }
 }
@@ -130,6 +138,18 @@ const POSTGRES_SRC: Artifact = Artifact {
 };
 
 pub const RELEASES: &[Release] = &[
+    Release {
+        kind: Kind::Mongodb,
+        version: "8.2.12",
+        arm64: Some(Artifact {
+            url: "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.2.12.tgz",
+            sha256: "8b1140dd745c23acafb812012fac3ff559c593065db631a5bec3dbafaf8dd1c2",
+            strip: 1,
+            provenance: "2026-11-11: sha256 from MongoDB's downloads.mongodb.org/full.json",
+            build: None,
+        }),
+        x86_64: None,
+    },
     Release {
         kind: Kind::Postgres,
         version: "18.6",
