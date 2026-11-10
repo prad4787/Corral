@@ -28,11 +28,32 @@ pub struct Expected {
 pub fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("corral/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        // Per-read timeout (not total), so large downloads on slow links work.
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()?)
 }
 
 /// Stream `url` to `dest`, returning (sha256, sha512) hex digests.
 pub async fn download(url: &str, dest: &Path) -> anyhow::Result<(String, String)> {
+    const ATTEMPTS: u32 = 3;
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match download_once(url, dest).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                tracing::warn!(%url, attempt, error = %e, "download failed");
+                last = Some(e);
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt))).await;
+                }
+            }
+        }
+    }
+    Err(last.expect("at least one attempt"))
+}
+
+async fn download_once(url: &str, dest: &Path) -> anyhow::Result<(String, String)> {
     tracing::info!(%url, "downloading");
     let resp = client()?
         .get(url)
