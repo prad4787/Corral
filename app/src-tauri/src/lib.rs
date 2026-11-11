@@ -840,6 +840,65 @@ async fn uninstall_corral(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    latest: Option<String>,
+    newer: bool,
+    url: Option<String>,
+}
+
+fn version_key(v: &str) -> Vec<u64> {
+    v.trim_start_matches('v')
+        .split(['.', '-'])
+        .map_while(|p| p.parse().ok())
+        .collect()
+}
+
+/// Ask GitHub for the latest release (no data is sent besides the request).
+#[tauri::command]
+async fn check_update() -> CmdResult<UpdateInfo> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let repo = env!("CARGO_PKG_REPOSITORY")
+        .trim_end_matches('/')
+        .trim_start_matches("https://github.com/")
+        .to_string();
+    let body = corral_fetch::client()
+        .map_err(err)?
+        .get(format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(err)?;
+    if body.status() == 404 {
+        return Ok(UpdateInfo {
+            current,
+            latest: None,
+            newer: false,
+            url: None,
+        });
+    }
+    let text = body
+        .error_for_status()
+        .map_err(err)?
+        .text()
+        .await
+        .map_err(err)?;
+    let rel: serde_json::Value = serde_json::from_str(&text).map_err(err)?;
+    let latest = rel["tag_name"].as_str().map(str::to_owned);
+    let newer = latest
+        .as_deref()
+        .is_some_and(|l| version_key(l) > version_key(&current));
+    Ok(UpdateInfo {
+        current,
+        latest,
+        newer,
+        url: rel["html_url"].as_str().map(str::to_owned),
+    })
+}
+
 /// Open a project folder in an editor or terminal.
 #[tauri::command]
 fn open_in(path: String, target: String) -> CmdResult<()> {
@@ -1072,6 +1131,7 @@ pub fn run() {
             adminer_remove,
             share_start,
             share_stop,
+            check_update,
             site_logs
         ])
         .build(tauri::generate_context!())

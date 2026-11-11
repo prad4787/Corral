@@ -2,6 +2,7 @@
 name = "corral-app"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Corral desktop app"
 authors = ["Corral contributors"]
 edition.workspace = true
@@ -25,6 +26,7 @@ corral-services.workspace = true
 corral-mail.workspace = true
 corral-dumps.workspace = true
 corral-system.workspace = true
+corral-fetch.workspace = true
 corral-core.workspace = true
 corral-engine.workspace = true
 anyhow.workspace = true

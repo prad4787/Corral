@@ -171,6 +171,8 @@ export const api = {
   adminerRemove: () => invoke<Overview>("adminer_remove"),
   shareStart: (site: string) => invoke<Overview>("share_start", { site }),
   shareStop: (site: string) => invoke<Overview>("share_stop", { site }),
+  checkUpdate: () =>
+    invoke<{ current: string; latest: string | null; newer: boolean; url: string | null }>("check_update"),
   uninstall: (deleteData: boolean) => invoke<void>("uninstall_corral", { deleteData }),
   eventsList: () => invoke<WatchEvent[]>("events_list", {}),
   eventsClear: () => invoke<void>("events_clear"),

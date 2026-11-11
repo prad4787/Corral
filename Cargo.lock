@@ -736,6 +736,7 @@ dependencies = [
  "corral-core",
  "corral-dumps",
  "corral-engine",
+ "corral-fetch",
  "corral-mail",
  "corral-services",
  "corral-system",

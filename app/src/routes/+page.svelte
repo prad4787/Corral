@@ -44,6 +44,7 @@
   // uninstall confirmation
   let confirmUninstall = $state(false);
   let deleteData = $state(false);
+  let update = $state<{ current: string; latest: string | null; newer: boolean; url: string | null } | null>(null);
 
   const site = $derived(data?.sites.find((s) => s.name === selected) ?? null);
   const filtered = $derived(
@@ -236,6 +237,8 @@
 
   onMount(() => {
     run("load", api.overview);
+    // One quiet check per launch; failures (offline) are ignored.
+    api.checkUpdate().then((u) => (update = u)).catch(() => {});
     // Pick up changes made from the CLI.
     const t = setInterval(() => {
       if (busy) return;
@@ -368,6 +371,9 @@
             <button class="btn" type="button" onclick={() => (showNew = false)}>Cancel</button>
           </div>
         </form>
+      {/if}
+      {#if update?.newer && update.url}
+        <button class="update" onclick={() => openUrl(update!.url!)}>Corral {update.latest} is available — Download</button>
       {/if}
       <footer class="actions">
         <button class="btn" onclick={() => (showNew = !showNew)} disabled={!!busy || !data?.parked.length}
@@ -825,6 +831,14 @@
           <p class="sub">Sites on .{data.tld} · HTTP :{data.http_port} · HTTPS :{data.https_port}</p>
         </section>
         <section>
+          <h2>About</h2>
+          <p class="sub">Corral {update?.current ?? ""}{update?.latest ? ` · latest release ${update.latest}` : ""}</p>
+          <button class="btn small" disabled={!!busy} onclick={() => act("upd", async () => {
+            update = await api.checkUpdate();
+            notice = update.newer ? `Corral ${update.latest} is available.` : "Corral is up to date.";
+          })}>Check for updates</button>
+        </section>
+        <section>
           <h2>Uninstall</h2>
           {#if !confirmUninstall}
             <button class="btn danger" onclick={() => (confirmUninstall = true)}>Uninstall Corral…</button>
@@ -1012,6 +1026,10 @@
   input.inline {
     font: inherit; padding: 4px 8px; margin-top: 4px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); width: 200px;
+  }
+  .update {
+    font: inherit; font-size: 12.5px; text-align: left; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--accent); background: var(--panel); color: var(--accent);
   }
   .setup { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
   .steps { list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; counter-reset: step; }

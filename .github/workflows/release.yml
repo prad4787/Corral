@@ -1,0 +1,111 @@
+# Builds and publishes a Corral release when a v* tag is pushed.
+#
+# Signing + notarization are enabled automatically when these repository
+# secrets exist (Apple Developer Program): APPLE_CERTIFICATE (base64 .p12),
+# APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
+# APPLE_PASSWORD (app-specific password) and APPLE_TEAM_ID. Without them the
+# build is unsigned (users must right-click → Open the first time).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { runner: macos-15, arch: arm64, rust: aarch64-apple-darwin }
+          - { runner: macos-15-intel, arch: x86_64, rust: x86_64-apple-darwin }
+    runs-on: ${{ matrix.target.runner }}
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+      - name: Build app (.app + .dmg)
+        working-directory: app
+        run: pnpm tauri build --bundles app,dmg --target ${{ matrix.target.rust }}
+      - name: Build CLI
+        run: cargo build --release -p corral-cli --target ${{ matrix.target.rust }}
+      - name: Collect artifacts
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          A=${{ matrix.target.arch }}
+          T=target/${{ matrix.target.rust }}/release
+          mkdir -p out
+          cp "$T"/bundle/dmg/*.dmg "out/Corral-$V-$A.dmg"
+          tar -C "$T" -czf "out/corral-cli-$V-macos-$A.tar.gz" corral
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corral-${{ matrix.target.arch }}
+          path: out/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and Homebrew cask
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          cd dist
+          shasum -a 256 * > SHA256SUMS
+          ARM=$(shasum -a 256 "Corral-$V-arm64.dmg" | cut -d' ' -f1)
+          X86=$(shasum -a 256 "Corral-$V-x86_64.dmg" | cut -d' ' -f1)
+          cat > corral.rb <<EOF
+          cask "corral" do
+            arch arm: "arm64", intel: "x86_64"
+            version "$V"
+            sha256 arm: "$ARM", intel: "$X86"
+
+            url "https://github.com/${{ github.repository }}/releases/download/v#{version}/Corral-#{version}-#{arch}.dmg"
+            name "Corral"
+            desc "Free, open-source local PHP development environment"
+            homepage "https://github.com/${{ github.repository }}"
+
+            depends_on macos: ">= :ventura"
+            app "Corral.app"
+
+            zap trash: [
+              "~/Library/Application Support/Corral",
+              "~/.corral",
+            ]
+          end
+          EOF
+          cat SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "Corral ${GITHUB_REF_NAME#v}" \
+            --generate-notes
