@@ -45,6 +45,7 @@ export interface Overview {
   https_port: number;
   system: SystemStatus;
   adminer: boolean;
+  mail_port: number;
   shares: [string, string][];
 }
 

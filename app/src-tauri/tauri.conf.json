@@ -14,16 +14,28 @@
       {
         "title": "Corral",
         "width": 1080,
-        "height": 720,
-        "minWidth": 840,
-        "minHeight": 540,
+        "height": 700,
+        "minWidth": 820,
+        "minHeight": 560,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "transparent": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 22
+        },
+        "windowEffects": {
+          "effects": [
+            "sidebar"
+          ],
+          "state": "followsWindowActiveState"
+        }
       }
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,

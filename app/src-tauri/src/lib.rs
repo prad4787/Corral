@@ -82,6 +82,7 @@ struct Overview {
     https_port: u16,
     system: corral_system::Status,
     adminer: bool,
+    mail_port: u16,
     /// (site, public url) for active shares.
     shares: Vec<(String, String)>,
 }
@@ -151,6 +152,7 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         https_port: cfg.https_port,
         system: corral_system::status(paths, &cfg),
         adminer: corral_engine::adminer::installed(paths),
+        mail_port: cfg.mail_port,
         shares: {
             let mut m = state.shares.lock().unwrap();
             m.retain(|_, sh| sh.alive());
@@ -824,9 +826,7 @@ async fn uninstall_corral(
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        let cfg = Config::load(&paths)?;
-        let st = corral_system::status(&paths, &cfg);
-        if st.dns || st.https || st.ports || corral_system::daemon_plist_path().exists() {
+        if corral_system::owned(&paths) {
             corral_system::undo(&paths)?;
         }
         let plan = corral_engine::uninstall::plan(&paths, &home(), delete_data)?;
