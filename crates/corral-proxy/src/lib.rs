@@ -37,6 +37,9 @@ pub struct ProxySite {
     pub debug_socket: Option<PathBuf>,
     /// Send every PHP request to the debug pool (an IDE is listening).
     pub debug_all: bool,
+    /// Proxy everything to a local HTTP service (e.g. `127.0.0.1:18082`)
+    /// instead of serving files/PHP. Used by built-in tools.
+    pub upstream: Option<String>,
     /// Present when the site is served over HTTPS.
     pub tls: Option<CertFiles>,
 }
@@ -95,6 +98,7 @@ pub fn proxy_sites(
                 fpm_socket,
                 debug_socket,
                 debug_all: false,
+                upstream: None,
                 tls: s.secure.then(|| cert_for(&s.host)),
             }
         })
@@ -171,6 +175,16 @@ fn php_routes(site: &ProxySite, socket: &Path, fc: &str) -> Vec<Value> {
 }
 
 fn site_route(site: &ProxySite) -> Value {
+    if let Some(up) = &site.upstream {
+        return json!({
+            "match": [{ "host": [site.host] }],
+            "handle": [{
+                "handler": "reverse_proxy",
+                "upstreams": [{ "dial": up }]
+            }],
+            "terminal": true
+        });
+    }
     let mut routes = vec![json!({
         "handle": [{ "handler": "vars", "root": site.docroot.display().to_string() }]
     })];
@@ -309,6 +323,7 @@ mod tests {
             fpm_socket: Some("/c/run/php-fpm-8.4.sock".into()),
             debug_socket: None,
             debug_all: false,
+            upstream: None,
             tls: tls.then(|| CertFiles {
                 cert: format!("/c/certs/{host}.crt").into(),
                 key: format!("/c/certs/{host}.key").into(),
@@ -395,6 +410,7 @@ mod tests {
             fpm_socket: None,
             debug_socket: None,
             debug_all: false,
+            upstream: None,
             tls: None,
         };
         let cfg = caddy_config(&settings(), &[missing, stat]);
@@ -450,6 +466,17 @@ mod tests {
         // Without a debug pool there is no trigger route.
         let plain = caddy_config(&settings(), &[php_site("b.test", false)]);
         assert!(!plain.to_string().contains("XDEBUG"));
+    }
+
+    #[test]
+    fn upstream_sites_reverse_proxy() {
+        let mut site = php_site("redis.test", false);
+        site.upstream = Some("127.0.0.1:18083".into());
+        let cfg = caddy_config(&settings(), &[site]);
+        let r = &routes(&cfg, "corral_http")[0];
+        assert_eq!(r["handle"][0]["handler"], "reverse_proxy");
+        assert_eq!(r["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:18083");
+        assert!(!r.to_string().contains("fastcgi"));
     }
 
     #[test]

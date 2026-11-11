@@ -11,6 +11,7 @@ pub mod node;
 pub mod orphans;
 pub mod project;
 pub mod share;
+pub mod tools;
 pub mod uninstall;
 
 use anyhow::Context;
@@ -90,28 +91,50 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
         let f = ca.ensure_leaf(&s.host)?;
         leaves.insert(s.host.clone(), f);
     }
-    // Built-in Adminer site (unless a real site already uses the name).
-    let adminer_host = format!("adminer.{}", cfg.tld);
-    let adminer = (adminer::installed(paths)
-        && !versions.is_empty()
-        && !sites.iter().any(|s| s.host == adminer_host))
-    .then(|| -> anyhow::Result<corral_proxy::ProxySite> {
-        let f = ca.ensure_leaf(&adminer_host)?;
-        leaves.insert(adminer_host.clone(), f.clone());
-        Ok(corral_proxy::ProxySite {
-            host: adminer_host.clone(),
-            docroot: adminer::dir(paths),
-            front_controller: Some("index.php".into()),
-            fpm_socket: Some(paths.fpm_socket(&versions[0].to_string())),
-            debug_socket: None,
-            debug_all: false,
-            tls: Some(CertFiles {
-                cert: f.cert,
-                key: f.key,
-            }),
-        })
-    })
-    .transpose()?;
+    // Built-in database tools (unless a real site already uses the name).
+    tools::write_phpmyadmin_config(paths)?;
+    let mut tool_sites = Vec::new();
+    let mut tool_fpm = Vec::new();
+    for tool in tools::Tool::ALL {
+        let host = tool.host(&cfg.tld);
+        if sites.iter().any(|s| s.host == host) {
+            continue;
+        }
+        let Some(how) = tools::serve(paths, tool) else {
+            continue;
+        };
+        let f = ca.ensure_leaf(&host)?;
+        leaves.insert(host.clone(), f.clone());
+        let tls = Some(CertFiles {
+            cert: f.cert,
+            key: f.key,
+        });
+        tool_sites.push(match how {
+            tools::Serve::Php { docroot, php: v } => {
+                tool_fpm.push(v.to_string());
+                corral_proxy::ProxySite {
+                    host,
+                    docroot,
+                    front_controller: Some("index.php".into()),
+                    fpm_socket: Some(paths.fpm_socket(&v.to_string())),
+                    debug_socket: None,
+                    debug_all: false,
+                    upstream: None,
+                    tls,
+                }
+            }
+            tools::Serve::Upstream(dial) => corral_proxy::ProxySite {
+                docroot: paths.root.clone(),
+                host,
+                front_controller: None,
+                fpm_socket: None,
+                debug_socket: None,
+                debug_all: false,
+                upstream: Some(dial),
+                tls,
+            },
+        });
+    }
     let keep: Vec<&str> = leaves.keys().map(String::as_str).collect();
     ca.prune_leaves(&keep)?;
 
@@ -122,8 +145,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
             key: f.key.clone(),
         }
     });
-    let adminer_fpm = adminer.as_ref().map(|_| versions[0].to_string());
-    proxy_sites.extend(adminer);
+    proxy_sites.extend(tool_sites);
     if ide_listening(&cfg) {
         for ps in proxy_sites.iter_mut().filter(|p| p.debug_socket.is_some()) {
             ps.debug_all = true;
@@ -137,7 +159,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
         serde_json::to_string_pretty(&caddy)?.as_bytes(),
     )?;
 
-    let mut fpm: BTreeSet<String> = adminer_fpm.into_iter().collect();
+    let mut fpm: BTreeSet<String> = tool_fpm.into_iter().collect();
     let mut missing = Vec::new();
     for (site, ps) in sites.iter().zip(&proxy_sites) {
         if let Some(sock) = &ps.fpm_socket {
@@ -223,6 +245,8 @@ fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
         paths.config_file(),
         paths.sites_file(),
         corral_services::store::services_file(paths),
+        // Installing/removing a tool changes this directory's mtime.
+        install::tools_dir(paths),
     ]
     .into_iter()
     .chain(parked)
@@ -388,6 +412,11 @@ pub fn process_specs(paths: &Paths, sites: &[Site]) -> anyhow::Result<Vec<Spec>>
             out.push(spec);
         }
     }
+    out.extend(
+        tools::Tool::ALL
+            .into_iter()
+            .filter_map(|t| tools::spec(paths, t)),
+    );
     Ok(out)
 }
 
@@ -399,7 +428,7 @@ async fn sync_processes(paths: &Paths, sup: &Supervisor, sites: &[Site]) -> anyh
         .await
         .into_iter()
         .map(|(n, _)| n)
-        .filter(|n| n.starts_with("proc-"))
+        .filter(|n| n.starts_with("proc-") || n.starts_with("tool-"))
         .collect();
     for name in running
         .iter()

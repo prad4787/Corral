@@ -170,10 +170,11 @@ enum Cmd {
         #[arg(long)]
         site: Option<String>,
     },
-    /// Built-in Adminer database GUI at https://adminer.<tld>.
-    Adminer {
-        /// install or remove
+    /// Database tools: adminer, phpmyadmin, pgweb, redis-commander.
+    Tool {
+        /// install, remove or list
         action: String,
+        name: Option<String>,
     },
     /// Background processes for a Laravel site: queue, schedule or reverb.
     Process {
@@ -781,22 +782,47 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             share.stop().await;
             println!("Stopped sharing {}", s.host);
         }
-        Cmd::Adminer { action } => match action.as_str() {
-            "install" => {
-                let v = corral_engine::adminer::install(&paths).await?;
-                corral_engine::render(&paths)?;
-                println!(
-                    "Adminer {v} at https://adminer.{} (127.0.0.1 only)",
-                    cfg.tld
-                );
+        Cmd::Tool { action, name } => {
+            use corral_engine::tools::Tool;
+            if action == "list" {
+                for t in Tool::ALL {
+                    println!(
+                        "{:<16} {:<10} https://{}{}",
+                        t.id(),
+                        if t.installed(&paths) {
+                            "installed"
+                        } else {
+                            "-"
+                        },
+                        t.host(&cfg.tld),
+                        corral_engine::tools::note(&paths, t)
+                            .map(|n| format!("  ({n})"))
+                            .unwrap_or_default()
+                    );
+                }
+            } else {
+                let n =
+                    name.context("name required: adminer, phpmyadmin, pgweb or redis-commander")?;
+                let t = Tool::parse(&n).with_context(|| format!("unknown tool {n:?}"))?;
+                match action.as_str() {
+                    "install" => {
+                        corral_engine::tools::install(&paths, t).await?;
+                        corral_engine::render(&paths)?;
+                        println!(
+                            "{} at https://{} (127.0.0.1 only)",
+                            t.label(),
+                            t.host(&cfg.tld)
+                        );
+                    }
+                    "remove" => {
+                        corral_engine::tools::remove(&paths, t)?;
+                        corral_engine::render(&paths)?;
+                        println!("{} removed", t.label());
+                    }
+                    other => bail!("unknown action {other:?}: use install, remove or list"),
+                }
             }
-            "remove" => {
-                corral_engine::adminer::remove(&paths)?;
-                corral_engine::render(&paths)?;
-                println!("Adminer removed");
-            }
-            other => bail!("unknown action {other:?}: use install or remove"),
-        },
+        }
         Cmd::Process { kind, state, site } => {
             let p = corral_core::sites::Process::parse(&kind).with_context(|| {
                 format!("unknown process {kind:?}: use queue, schedule or reverb")
@@ -1192,12 +1218,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{name} disabled");
         }
         Cmd::Service(ServiceCmd::Remove { name, delete_data }) => {
-            corral_services::remove(&paths, &name, delete_data)?;
-            if delete_data {
-                println!("Removed {name} and deleted its data");
-            } else {
+            println!("Stopping {name}…");
+            let r = corral_services::uninstall(&paths, &name, delete_data).await?;
+            println!(
+                "Removed {name}{}{}",
+                if r.runtime { ", its runtime" } else { "" },
+                if r.data { " and its data" } else { "" }
+            );
+            if !delete_data {
                 println!(
-                    "Removed {name}; data kept in {}",
+                    "Data kept in {} (use --delete-data to remove it)",
                     corral_services::store::data_dir(&paths, &name).display()
                 );
             }

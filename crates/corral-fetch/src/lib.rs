@@ -124,6 +124,31 @@ pub fn extract_entry(archive: &Path, entry: &str, dest: &Path) -> anyhow::Result
     bail!("{} does not contain {entry}", archive.display())
 }
 
+/// Extract the regular-file entry whose basename is `entry` from a `.zip`
+/// into `dest` with mode 0755 (only that entry is read).
+pub fn extract_zip_entry(archive: &Path, entry: &str, dest: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i)?;
+        let name = f.name().to_string();
+        let base = name.rsplit('/').next().unwrap_or(&name);
+        if f.is_file() && base == entry {
+            if let Some(dir) = dest.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let tmp = dest.with_extension("extracting");
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)?;
+            std::fs::write(&tmp, &buf)?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::rename(&tmp, dest)?;
+            return Ok(());
+        }
+    }
+    bail!("{} does not contain {entry}", archive.display())
+}
+
 /// Parse a `checksums.txt` (`<hex>  <filename>` per line) and find `file`.
 pub fn find_checksum(checksums: &str, file: &str) -> Option<String> {
     checksums.lines().find_map(|l| {
@@ -339,6 +364,24 @@ mod tests {
         h.set_size(0);
         h.set_mode(0o777);
         b.append_link(&mut h, name, target).unwrap();
+    }
+
+    #[test]
+    fn extracts_named_zip_entry() {
+        use std::io::Write;
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("README.md", opts).unwrap();
+        w.write_all(b"readme").unwrap();
+        w.start_file("pgweb_darwin_arm64", opts).unwrap();
+        w.write_all(b"BIN").unwrap();
+        w.finish().unwrap();
+        let dest = t.path().join("tools/pgweb");
+        extract_zip_entry(&p, "pgweb_darwin_arm64", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"BIN");
+        assert!(extract_zip_entry(&p, "nope", &t.path().join("x")).is_err());
     }
 
     #[test]

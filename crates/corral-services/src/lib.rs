@@ -324,6 +324,80 @@ pub async fn add(
     Ok((name, inst))
 }
 
+/// What [`uninstall`] removed, for the UI.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct Removed {
+    pub runtime: bool,
+    pub data: bool,
+    pub logs: usize,
+}
+
+/// Completely remove an instance: stop it (the engine stops disabled
+/// services), wait until its port is free so nothing is deleted while the
+/// database is still writing, then delete its config, logs, the downloaded
+/// runtime (if no other instance uses that version) and, with `delete_data`,
+/// its data directory.
+pub async fn uninstall(paths: &Paths, name: &str, delete_data: bool) -> anyhow::Result<Removed> {
+    let mut file = ServicesFile::load(paths)?;
+    let inst = file.get(name)?.clone();
+    if inst.enabled {
+        file.set_enabled(name, false)?;
+        file.save(paths)?;
+    }
+    // A running Corral stops it within ~1s; databases may take a while to flush.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while port_in_use(inst.port) {
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "{name} is still running on port {}; stop it and try again",
+                inst.port
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let mut file = ServicesFile::load(paths)?;
+    file.remove(name)?;
+    file.save(paths)?;
+
+    let mut out = Removed::default();
+    let _ = std::fs::remove_file(store::conf_file(paths, name));
+    let _ = std::fs::remove_file(store::socket(paths, name));
+    for e in std::fs::read_dir(paths.logs_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let ours = n.starts_with(&format!("service-{name}."))
+            || n.starts_with(&format!("service-{name}-"));
+        if ours && std::fs::remove_file(e.path()).is_ok() {
+            out.logs += 1;
+        }
+    }
+    let shared = file
+        .instances
+        .values()
+        .any(|i| i.kind == inst.kind && i.version == inst.version);
+    if !shared {
+        let dist = store::dist_dir(paths, inst.kind, &inst.version);
+        anyhow::ensure!(paths.owns(&dist), "refusing to delete {}", dist.display());
+        if dist.exists() {
+            std::fs::remove_dir_all(&dist)?;
+            out.runtime = true;
+        }
+    }
+    if delete_data {
+        let data = store::data_dir(paths, name);
+        anyhow::ensure!(paths.owns(&data), "refusing to delete {}", data.display());
+        if data.exists() {
+            std::fs::remove_dir_all(&data)?;
+            out.data = true;
+        }
+    }
+    write_shims(paths, &file)?;
+    Ok(out)
+}
+
 /// Remove an instance; optionally delete its data directory.
 pub fn remove(paths: &Paths, name: &str, delete_data: bool) -> anyhow::Result<()> {
     let mut file = ServicesFile::load(paths)?;
@@ -339,4 +413,51 @@ pub fn remove(paths: &Paths, name: &str, delete_data: bool) -> anyhow::Result<()
     }
     write_shims(paths, &file)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use manifest::Kind;
+
+    #[tokio::test]
+    async fn uninstall_removes_everything_but_shared_runtime() {
+        let t = tempfile::tempdir().unwrap();
+        let p = Paths::at(t.path());
+        p.ensure().unwrap();
+        let mut f = ServicesFile::default();
+        // Ports nothing listens on, so no waiting.
+        for (n, port) in [("db1", 39111u16), ("db2", 39112)] {
+            f.add(
+                n,
+                Instance {
+                    kind: Kind::Mysql,
+                    version: "8.4.11".into(),
+                    port,
+                    enabled: true,
+                },
+            )
+            .unwrap();
+            std::fs::create_dir_all(store::data_dir(&p, n)).unwrap();
+            std::fs::write(store::data_dir(&p, n).join("ibdata1"), "x").unwrap();
+            std::fs::write(p.logs_dir().join(format!("service-{n}.err.log")), "x").unwrap();
+        }
+        f.save(&p).unwrap();
+        let dist = store::dist_dir(&p, Kind::Mysql, "8.4.11");
+        std::fs::create_dir_all(dist.join("bin")).unwrap();
+
+        let r = uninstall(&p, "db1", true).await.unwrap();
+        assert!(r.data && !r.runtime && r.logs == 1, "{r:?}");
+        assert!(dist.exists(), "db2 still uses the runtime");
+        assert!(!store::data_dir(&p, "db1").exists());
+
+        let r = uninstall(&p, "db2", false).await.unwrap();
+        assert!(r.runtime && !r.data, "{r:?}");
+        assert!(!dist.exists());
+        assert!(
+            store::data_dir(&p, "db2").exists(),
+            "data kept when not asked to delete"
+        );
+        assert!(ServicesFile::load(&p).unwrap().instances.is_empty());
+    }
 }
