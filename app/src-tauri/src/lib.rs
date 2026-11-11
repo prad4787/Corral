@@ -41,6 +41,7 @@ struct SiteView {
 struct PhpView {
     version: String,
     is_default: bool,
+    build: php::Build,
 }
 
 #[derive(Serialize)]
@@ -247,6 +248,7 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         .into_iter()
         .map(|i| PhpView {
             is_default: cfg.default_php.as_deref() == Some(&i.version.to_string()),
+            build: php::build(&i),
             version: i.version.to_string(),
         })
         .collect();
@@ -491,13 +493,15 @@ fn stop_engine(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Overview
 }
 
 /// Long-running installs. `what`: "web" (Caddy + Composer), "php" (needs
-/// `version`; unverified upstream build), or "mysql".
+/// `version`, optional `build` "standard"|"extended"; reinstalling switches
+/// the build in place), a tool, or a service kind.
 #[tauri::command]
 async fn install_component(
     app: AppHandle,
     state: State<'_, AppState>,
     what: String,
     version: Option<String>,
+    build: Option<String>,
 ) -> CmdResult<Overview> {
     let paths = state.paths.clone();
     match what.as_str() {
@@ -519,9 +523,12 @@ async fn install_component(
         "php" => {
             let v = PhpVersion::parse(version.as_deref().unwrap_or("8.4"))
                 .ok_or("invalid PHP version")?;
-            let full = install::latest_static_php(v).await.map_err(err)?;
-            let src = install::PhpSource::static_php(&full);
-            install::install_php(&paths, v, &src, true)
+            let b = build
+                .as_deref()
+                .map(|b| php::Build::parse(b).ok_or("unknown PHP build"))
+                .transpose()?
+                .unwrap_or(php::Build::Standard);
+            install::install_php_build(&paths, v, b)
                 .await
                 .map_err(err)?;
             let mut cfg = Config::load(&paths).map_err(err)?;
@@ -617,6 +624,62 @@ fn write_env(state: State<'_, AppState>, site: String, contents: String) -> CmdR
         std::fs::copy(&f, &backup).map_err(err)?;
     }
     corral_core::fsutil::write_atomic(&f, contents.as_bytes()).map_err(err)
+}
+
+/// One PHP version in detail: build, compiled-in extensions and settings.
+#[derive(Serialize)]
+struct PhpDetails {
+    version: String,
+    build: php::Build,
+    modules: Vec<String>,
+    xdebug: bool,
+    /// What PHP uses (base ini + conf.d).
+    settings: std::collections::BTreeMap<String, String>,
+    /// Only the user's overrides.
+    overrides: std::collections::BTreeMap<String, String>,
+}
+
+fn find_php(state: &AppState, version: &str) -> Result<php::Installation, String> {
+    let v = PhpVersion::parse(version).ok_or("invalid PHP version")?;
+    php::find(&state.paths, v)
+        .map_err(err)?
+        .ok_or_else(|| format!("PHP {v} is not installed"))
+}
+
+#[tauri::command]
+async fn php_details(state: State<'_, AppState>, version: String) -> CmdResult<PhpDetails> {
+    let inst = find_php(&state, &version)?;
+    // `php -m` runs a process: keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || PhpDetails {
+        version: inst.version.to_string(),
+        build: php::build(&inst),
+        modules: php::modules(&inst),
+        xdebug: php::xdebug_available(&inst),
+        settings: php::effective_settings(&inst),
+        overrides: php::user_settings(&inst),
+    })
+    .await
+    .map_err(err)
+}
+
+/// Apply setting changes to 90-user.ini (`null` removes the override, so the
+/// Corral default applies). The engine restarts the pool on change.
+#[tauri::command]
+fn set_php_settings(
+    state: State<'_, AppState>,
+    version: String,
+    changes: std::collections::BTreeMap<String, Option<String>>,
+) -> CmdResult<()> {
+    let inst = find_php(&state, &version)?;
+    for (k, v) in &changes {
+        php::set_user_ini(
+            &inst,
+            k,
+            v.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+        )
+        .map_err(err)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1334,6 +1397,8 @@ pub fn run() {
             read_env,
             write_env,
             read_php_ini,
+            php_details,
+            set_php_settings,
             write_php_ini,
             node_install,
             node_use,

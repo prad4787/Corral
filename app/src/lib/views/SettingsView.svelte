@@ -6,7 +6,6 @@
   import Switch from "$lib/ui/Switch.svelte";
   import Menu from "$lib/ui/Menu.svelte";
   import Sheet from "$lib/ui/Sheet.svelte";
-  import TextField from "$lib/ui/TextField.svelte";
   import StatusDot from "$lib/ui/StatusDot.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { api } from "$lib/api";
@@ -17,8 +16,6 @@
   const d = $derived(app.data!);
   const sys = $derived(d.system);
 
-  let iniVersion = $state<string | null>(null);
-  let iniText = $state("");
   let confirmUninstall = $state(false);
   let deleteData = $state(false);
 
@@ -55,7 +52,7 @@
     <Row title="Standard ports" description={sys.ports ? "Ports 80 and 443." : `Using ${d.http_port} and ${d.https_port}.`}>{#snippet leading()}<StatusDot on={sys.ports} label={sys.ports ? "On" : "Off"} />{/snippet}</Row>
   </Group>
 
-  <Group title="PHP">
+  <Group title="PHP" footer="Upload size, memory, timeouts, error display and extensions are set per version.">
     {#snippet actions()}
       <Menu
         label="Install PHP Version"
@@ -65,11 +62,11 @@
       />
     {/snippet}
     {#each d.php as p (p.version)}
-      <Row title="PHP {p.version}" description={p.is_default ? "Default" : undefined}>
-        <Button size="small" disabled={!!app.busy} onclick={() => app.act("ini", async () => { iniText = await api.readPhpIni(p.version); iniVersion = p.version; })}>Edit php.ini…</Button>
+      <Row title="PHP {p.version}" description="{p.build === 'extended' ? 'Extended build' : 'Standard build'}{p.is_default ? ' · Default' : ''}">
         {#if !p.is_default}
           <Button size="small" disabled={!!app.busy} onclick={() => app.run("defphp", () => api.setDefaultPhp(p.version))}>Make Default</Button>
         {/if}
+        <Button size="small" onclick={() => { app.phpVersion = p.version; app.view = "php"; }}>Settings & Extensions…</Button>
       </Row>
     {:else}
       <Row title="No PHP installed" description="Use the + button to install a version." />
@@ -124,16 +121,6 @@
 
   <div class="danger"><Button variant="destructive" onclick={() => (confirmUninstall = true)}>Uninstall Corral…</Button></div>
 </div>
-
-{#if iniVersion}
-  <Sheet title="PHP {iniVersion} settings" message="Your overrides (90-user.ini). PHP restarts automatically after saving." width="560px" onclose={() => (iniVersion = null)}>
-    <TextField label="php.ini overrides" bind:value={iniText} multiline mono rows={14} />
-    {#snippet buttons()}
-      <Button onclick={() => (iniVersion = null)}>Cancel</Button>
-      <Button variant="primary" disabled={!!app.busy} onclick={() => app.act("saveini", async () => { await api.writePhpIni(iniVersion!, iniText); iniVersion = null; })}>Save</Button>
-    {/snippet}
-  </Sheet>
-{/if}
 
 {#if confirmUninstall}
   <Sheet title="Uninstall Corral?" message="Removes Corral’s runtimes, settings, certificates and system changes, then quits. Your projects are not touched." onclose={() => (confirmUninstall = false)}>

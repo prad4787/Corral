@@ -30,7 +30,7 @@ const overview = () => setupPreview ? {
 const fullOverview = () => ({
   sites,
   node: [{ major: 24, version: "v24.11.0", is_default: true }],
-  php: [{ version: "8.4", is_default: true }, { version: "8.3", is_default: false }],
+  php: [{ version: "8.4", is_default: true, build: "standard" }, { version: "8.3", is_default: false, build: "extended" }],
   services: [
     { name: "mysql", kind: "mysql", label: "MySQL", version: "8.4.11", port: 3306, enabled: true, listening: true },
     { name: "valkey", kind: "valkey", label: "Valkey (Redis-compatible)", version: "9.1.3", port: 6379, enabled: false, listening: false },
@@ -111,6 +111,15 @@ const handlers: Record<string, (args: any) => unknown> = {
     { time: "2026-11-11 09:40:12", env: "local", level: "info", message: "Order 1042 shipped", details: "" },
   ],
   read_env: () => "APP_NAME=Shop\nAPP_ENV=local\nAPP_URL=https://ecommerce.test\nDB_CONNECTION=mysql\nDB_DATABASE=ecommerce\n",
+  php_details: ({ version }) => ({
+    version,
+    build: version === "8.3" ? "extended" : "standard",
+    xdebug: version === "8.4",
+    modules: ["bcmath", "bz2", "calendar", "core", "ctype", "curl", "date", "dom", "exif", "fileinfo", "filter", "ftp", "gd", "gmp", "hash", "iconv", "json", "libxml", "mbstring", "mysqlnd", "openssl", "pcntl", "pcre", "pdo", "pdo_mysql", "pdo_pgsql", "pdo_sqlite", "pgsql", "phar", "posix", "random", "redis", "reflection", "session", "simplexml", "soap", "sockets", "spl", "sqlite3", "standard", "tokenizer", "xml", "xmlreader", "xmlwriter", "zip", "zlib", ...(version === "8.3" ? ["mysqli", "intl", "imagick", "apcu", "swoole"] : [])].sort(),
+    settings: { memory_limit: "512M", upload_max_filesize: "512M", post_max_size: "256M", max_execution_time: "120", display_errors: "On", error_reporting: "E_ALL & ~E_DEPRECATED", log_errors: "On", "date.timezone": "UTC", "opcache.enable": "1", "opcache.validate_timestamps": "1" },
+    overrides: { post_max_size: "256M" },
+  }),
+  set_php_settings: () => null,
   read_php_ini: () => "; Your PHP overrides\nmemory_limit = 1G\n",
 };
 

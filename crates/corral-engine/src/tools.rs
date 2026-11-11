@@ -17,9 +17,7 @@ use corral_services::manifest::Kind;
 use corral_services::store::ServicesFile;
 use corral_supervisor::Spec;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 pub const PGWEB_PORT: u16 = 18082;
 pub const REDIS_COMMANDER_PORT: u16 = 18083;
@@ -118,32 +116,10 @@ fn rc_entry(paths: &Paths) -> PathBuf {
         .join("node_modules/redis-commander/bin/redis-commander.js")
 }
 
-// --- PHP capability (cached: `php -m` per binary + mtime) -------------------
-
-type ModCache = HashMap<(PathBuf, Option<std::time::SystemTime>), Vec<String>>;
-static MODULES: Mutex<Option<ModCache>> = Mutex::new(None);
+// --- PHP capability ----------------------------------------------------------
 
 pub fn php_has(inst: &Installation, ext: &str) -> bool {
-    let cli = inst.cli();
-    let key = (
-        cli.clone(),
-        std::fs::metadata(&cli).and_then(|m| m.modified()).ok(),
-    );
-    let mut guard = MODULES.lock().unwrap();
-    let cache = guard.get_or_insert_with(HashMap::new);
-    let mods = cache.entry(key).or_insert_with(|| {
-        std::process::Command::new(&cli)
-            .args(["-n", "-m"])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_ascii_lowercase())
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-    mods.iter().any(|m| m == ext)
+    php::has_module(inst, ext)
 }
 
 /// PHP installation to serve a PHP tool with, or why none fits.
@@ -156,7 +132,7 @@ pub fn php_for(paths: &Paths, tool: Tool) -> Result<Installation, String> {
             .find(|i| i.version < PhpVersion { major: 8, minor: 4 } && php_has(i, "mysqli"))
             .cloned()
             .ok_or_else(|| {
-                "Needs PHP 8.3 or older with the mysqli extension (Corral’s own PHP builds include it)."
+                "Needs PHP 8.3 or older with mysqli. Installing phpMyAdmin sets this up; or switch PHP 8.3 to the Extended build in Settings."
                     .to_string()
             }),
         _ => installs.first().cloned().ok_or_else(|| "Install PHP first.".to_string()),
@@ -259,6 +235,18 @@ pub fn write_phpmyadmin_config(paths: &Paths) -> anyhow::Result<()> {
 }
 
 async fn install_phpmyadmin(paths: &Paths) -> anyhow::Result<()> {
+    // phpMyAdmin 5.2 needs PHP < 8.4 with mysqli: provide PHP 8.3 (Extended
+    // build) when no installed version fits. Switching an existing 8.3 to
+    // the Extended build only adds extensions.
+    if php_for(paths, Tool::Phpmyadmin).is_err() {
+        crate::install::install_php_build(
+            paths,
+            PhpVersion { major: 8, minor: 3 },
+            php::Build::Extended,
+        )
+        .await
+        .context("installing PHP 8.3 (Extended build) for phpMyAdmin")?;
+    }
     let body = corral_fetch::client()?
         .get("https://www.phpmyadmin.net/home_page/version.json")
         .send()

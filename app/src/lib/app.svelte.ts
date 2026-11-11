@@ -2,12 +2,14 @@
 // so busy/error handling is consistent everywhere.
 import { api, type Overview } from "$lib/api";
 
-export type View = "sites" | "site" | "services" | "mail" | "dumps" | "settings";
+export type View = "sites" | "site" | "services" | "mail" | "dumps" | "settings" | "php";
 
 class AppState {
   data = $state<Overview | null>(null);
   view = $state<View>("sites");
   selected = $state<string | null>(null);
+  /** PHP version shown by the "php" view. */
+  phpVersion = $state<string | null>(null);
   query = $state("");
   /** Label of the action in progress (disables controls, shows progress). */
   busy = $state<string | null>(null);

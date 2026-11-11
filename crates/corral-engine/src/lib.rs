@@ -254,7 +254,8 @@ fn mtimes(paths: &Paths) -> Vec<Option<SystemTime>> {
     .collect()
 }
 
-/// Per installed PHP version: (file name, mtime, size) of every conf.d entry.
+/// Per installed PHP version: (file name, mtime, size) of every conf.d entry,
+/// plus the FPM binary.
 fn user_ini_fingerprints(
     paths: &Paths,
 ) -> std::collections::BTreeMap<String, Vec<(String, Option<SystemTime>, u64)>> {
@@ -276,6 +277,13 @@ fn user_ini_fingerprints(
                 })
                 .collect();
             files.sort();
+            // A replaced binary (switching builds) also needs a restart.
+            let m = std::fs::metadata(inst.fpm()).ok();
+            files.push((
+                "\0php-fpm".into(),
+                m.as_ref().and_then(|m| m.modified().ok()),
+                m.map_or(0, |m| m.len()),
+            ));
             (inst.version.to_string(), files)
         })
         .collect()

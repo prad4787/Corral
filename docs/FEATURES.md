@@ -17,7 +17,7 @@ Legend:
 | 1.1 | Multiple PHP versions (7.4 to 8.5) | Free | Download prebuilt static CLI + FPM binaries per minor version into `~/Library/Application Support/Corral/php/<ver>/` | Reuse: static-php-cli (MIT) to build our own release artifacts in GitHub Actions. PHP License 3.01 allows redistribution | 1 |
 | 1.2 | Global default PHP | Free | `~/.corral/bin/php` shim that points at the default version | Build | 1 |
 | 1.3 | Per-site PHP version ("isolate") | Free | One FPM pool per version (`fpm-<ver>.sock`), and each site's server config points at the right socket | Build | 1 |
-| 1.4 | Per-version `php.ini` editing and extension toggles | Free | Generated base ini plus a user override file, editable in the UI, with an FPM reload after changes | Build | 2 |
+| 1.4 | Per-version `php.ini` editing and extensions | Free | Generated base ini plus a user override file. The UI has a settings form (upload/POST size, memory, timeouts, input vars, errors, OPcache, time zone) and a raw editor; the pool restarts after changes. Static builds cannot load extensions, so extensions come from choosing the Standard (static-php "common") or Extended ("bulk": mysqli, intl, imagick, apcu, swoole, …) build per version | Build | 2 |
 | 1.5 | Parked directories | Free | Each folder in a parked path becomes `<folder>.test` | Build: Rust site registry | 1 |
 | 1.6 | Linked sites (custom name and path) | Free | Registry entries in SQLite (not symlinks) | Build | 1 |
 | 1.7 | Framework detection (Laravel, WordPress, Statamic, Craft, Symfony, static, generic `public/`) | Free | Rust "driver" trait that detects the project type and returns the docroot and front controller | Build: written from Valet's MIT-licensed driver *logic*, taken from upstream laravel/valet | 1 |

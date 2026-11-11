@@ -11,6 +11,7 @@
   import MailView from "$lib/views/MailView.svelte";
   import DumpsView from "$lib/views/DumpsView.svelte";
   import SettingsView from "$lib/views/SettingsView.svelte";
+  import PhpView from "$lib/views/PhpView.svelte";
 
   let mails = $state<MailSummary[]>([]);
   let dumps = $state<Dump[]>([]);
@@ -45,6 +46,7 @@
       if (!import.meta.env.DEV) return;
       const q = new URLSearchParams(location.search);
       if (q.get("site")) app.openSite(q.get("site")!);
+      else if (q.get("php")) { app.phpVersion = q.get("php"); app.view = "php"; }
       else if (q.get("view")) app.view = q.get("view") as typeof app.view;
     });
     api.checkUpdate().then((u) => (update = u)).catch(() => {});
@@ -79,7 +81,9 @@
         <MailView {mails} />
       {:else if app.view === "dumps"}
         <DumpsView {dumps} {events} />
-      {:else if app.view === "settings"}
+      {:else if app.view === "php" && app.phpVersion && app.data?.php.some((p) => p.version === app.phpVersion)}
+        <PhpView />
+      {:else if app.view === "settings" || app.view === "php"}
         <SettingsView bind:update />
       {:else}
         <SitesView />

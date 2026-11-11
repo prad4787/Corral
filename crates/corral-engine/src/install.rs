@@ -2,7 +2,7 @@
 
 use anyhow::{Context, bail};
 use corral_core::paths::Paths;
-use corral_core::php::PhpVersion;
+use corral_core::php::{Build, PhpVersion};
 pub use corral_fetch::{Expected, Hash, client, download, extract_entry, find_checksum, verify};
 use std::path::PathBuf;
 
@@ -217,17 +217,24 @@ pub struct PhpSource {
     pub fpm_sha256: Option<String>,
 }
 
+fn static_php_base(build: Build) -> &'static str {
+    match build {
+        Build::Standard => "https://dl.static-php.dev/static-php-cli/common",
+        Build::Extended => "https://dl.static-php.dev/static-php-cli/bulk",
+    }
+}
+
 impl PhpSource {
-    /// Upstream static-php-cli "common" builds. They publish no checksums, so
-    /// installing from here requires `allow_unverified` until Corral hosts its
-    /// own signed manifest (PLAN 0.5).
-    pub fn static_php(full_version: &str) -> Self {
+    /// Upstream static-php-cli builds ("common" = Standard, "bulk" =
+    /// Extended). They publish no checksums, so installing from here requires
+    /// `allow_unverified` until Corral hosts its own signed manifest.
+    pub fn static_php(full_version: &str, build: Build) -> Self {
         let a = if cfg!(target_arch = "aarch64") {
             "aarch64"
         } else {
             "x86_64"
         };
-        let base = "https://dl.static-php.dev/static-php-cli/common";
+        let base = static_php_base(build);
         Self {
             cli_url: format!("{base}/php-{full_version}-cli-macos-{a}.tar.gz"),
             fpm_url: format!("{base}/php-{full_version}-fpm-macos-{a}.tar.gz"),
@@ -238,15 +245,29 @@ impl PhpSource {
 }
 
 /// Find the newest patch release of `minor` in the static-php index page.
-pub async fn latest_static_php(minor: PhpVersion) -> anyhow::Result<String> {
+pub async fn latest_static_php(minor: PhpVersion, build: Build) -> anyhow::Result<String> {
     let html = client()?
-        .get("https://dl.static-php.dev/static-php-cli/common/")
+        .get(format!("{}/", static_php_base(build)))
         .send()
         .await?
         .error_for_status()?
         .text()
         .await?;
     newest_patch(&html, minor).with_context(|| format!("no static build of PHP {minor} found"))
+}
+
+/// Install (or switch the build of) PHP `minor` from upstream static builds
+/// and record which build it is. Returns the full version installed.
+pub async fn install_php_build(
+    paths: &Paths,
+    minor: PhpVersion,
+    build: Build,
+) -> anyhow::Result<String> {
+    let full = latest_static_php(minor, build).await?;
+    let src = PhpSource::static_php(&full, build);
+    let dir = install_php(paths, minor, &src, true).await?;
+    corral_core::php::set_build(&dir, build)?;
+    Ok(full)
 }
 
 /// Pure helper for [`latest_static_php`].
@@ -350,7 +371,8 @@ mod tests {
     async fn php_install_requires_checksums_unless_opted_out() {
         let t = tempfile::tempdir().unwrap();
         let p = Paths::at(t.path());
-        let src = PhpSource::static_php("8.4.23");
+        let src = PhpSource::static_php("8.4.23", Build::Extended);
+        assert!(src.cli_url.contains("/bulk/"));
         let err = install_php(&p, PhpVersion::parse("8.4").unwrap(), &src, false)
             .await
             .unwrap_err();

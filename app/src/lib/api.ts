@@ -30,7 +30,7 @@ export interface Service {
 export interface Overview {
   node: { major: number; version: string; is_default: boolean }[];
   sites: Site[];
-  php: { version: string; is_default: boolean }[];
+  php: { version: string; is_default: boolean; build: PhpBuild }[];
   services: Service[];
   tld: string;
   parked: string[];
@@ -127,6 +127,17 @@ export interface LogEntry {
   details: string;
 }
 
+export type PhpBuild = "standard" | "extended";
+
+export type PhpDetails = {
+  version: string;
+  build: PhpBuild;
+  modules: string[];
+  xdebug: boolean;
+  settings: Record<string, string>;
+  overrides: Record<string, string>;
+};
+
 export const api = {
   overview: () => invoke<Overview>("overview"),
   park: (dir: string) => invoke<Overview>("park", { dir }),
@@ -140,8 +151,11 @@ export const api = {
   setDefaultPhp: (version: string) => invoke<Overview>("set_default_php", { version }),
   start: () => invoke<Overview>("start_engine"),
   stop: () => invoke<Overview>("stop_engine"),
-  install: (what: "web" | "php" | "mysql" | "valkey" | "postgres" | "mongodb" | "adminer", version?: string) =>
-    invoke<Overview>("install_component", { what, version }),
+  install: (what: "web" | "php" | "mysql" | "valkey" | "postgres" | "mongodb" | "adminer", version?: string, build?: PhpBuild) =>
+    invoke<Overview>("install_component", { what, version, build }),
+  phpDetails: (version: string) => invoke<PhpDetails>("php_details", { version }),
+  setPhpSettings: (version: string, changes: Record<string, string | null>) =>
+    invoke<void>("set_php_settings", { version, changes }),
   setServiceEnabled: (name: string, enabled: boolean) =>
     invoke<Overview>("set_service_enabled", { name, enabled }),
   setShellPath: (enabled: boolean) => invoke<Overview>("set_shell_path", { enabled }),

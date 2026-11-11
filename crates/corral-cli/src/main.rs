@@ -301,6 +301,9 @@ enum PhpCmd {
         /// artifact; includes Xdebug when the build has it.
         #[arg(long)]
         manifest: Option<String>,
+        /// Use the Extended upstream build (adds mysqli, intl, imagick, …).
+        #[arg(long)]
+        extended: bool,
     },
     /// Remove an installed version.
     Remove { version: String },
@@ -536,6 +539,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             version,
             allow_unverified,
             manifest,
+            extended,
         }) => {
             let v = parse_php(&version)?;
             let full = if let Some(src) = manifest.as_deref() {
@@ -555,10 +559,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 );
                 b.version
             } else {
-                let full = install::latest_static_php(v).await?;
-                let src = install::PhpSource::static_php(&full);
-                install::install_php(&paths, v, &src, allow_unverified).await?;
-                full
+                if !allow_unverified {
+                    bail!(
+                        "refusing to install PHP {v} without checksums (pass --allow-unverified to override)"
+                    );
+                }
+                let build = if extended {
+                    php::Build::Extended
+                } else {
+                    php::Build::Standard
+                };
+                install::install_php_build(&paths, v, build).await?
             };
             if cfg.default_php.is_none() {
                 cfg.default_php = Some(v.to_string());

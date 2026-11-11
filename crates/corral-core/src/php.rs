@@ -64,6 +64,136 @@ impl Installation {
     }
 }
 
+/// Which upstream static build a version came from. Static binaries cannot
+/// load extensions at runtime, so "installing an extension" means switching
+/// to a build that has it compiled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Build {
+    /// static-php-cli "common": the usual web extensions.
+    Standard,
+    /// static-php-cli "bulk": adds mysqli, intl, imagick, apcu, swoole, ldap,
+    /// imap and more.
+    Extended,
+}
+
+impl Build {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "standard" | "common" => Some(Self::Standard),
+            "extended" | "bulk" => Some(Self::Extended),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Extended => "extended",
+        }
+    }
+}
+
+fn build_marker(inst: &Installation) -> PathBuf {
+    inst.dir.join("build")
+}
+
+/// The build an installation came from (Standard when unknown).
+pub fn build(inst: &Installation) -> Build {
+    std::fs::read_to_string(build_marker(inst))
+        .ok()
+        .and_then(|s| Build::parse(&s))
+        .unwrap_or(Build::Standard)
+}
+
+pub fn set_build(dir: &std::path::Path, b: Build) -> std::io::Result<()> {
+    write_atomic(&dir.join("build"), format!("{}\n", b.as_str()).as_bytes())
+}
+
+type ModCache = std::collections::HashMap<(PathBuf, Option<std::time::SystemTime>), Vec<String>>;
+static MODULES: std::sync::Mutex<Option<ModCache>> = std::sync::Mutex::new(None);
+
+/// Compiled-in extensions (lowercase, from `php -n -m`), cached per binary.
+pub fn modules(inst: &Installation) -> Vec<String> {
+    let cli = inst.cli();
+    let key = (
+        cli.clone(),
+        std::fs::metadata(&cli).and_then(|m| m.modified()).ok(),
+    );
+    let mut guard = MODULES.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(Default::default);
+    cache
+        .entry(key)
+        .or_insert_with(|| {
+            let out = std::process::Command::new(&cli)
+                .args(["-n", "-m"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            parse_modules(&out)
+        })
+        .clone()
+}
+
+/// Module names from `php -m` output, skipping section headers.
+pub fn parse_modules(out: &str) -> Vec<String> {
+    let mut v: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('['))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+pub fn has_module(inst: &Installation, ext: &str) -> bool {
+    modules(inst).iter().any(|m| m == ext)
+}
+
+/// `key = value` pairs of an ini file (later keys win; quotes stripped).
+pub fn parse_ini(body: &str) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    for line in body.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with(';') || l.starts_with('#') || l.starts_with('[') {
+            continue;
+        }
+        if let Some((k, v)) = l.split_once('=') {
+            let v = v.trim();
+            let v = v
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .unwrap_or(v);
+            m.insert(k.trim().to_string(), v.to_string());
+        }
+    }
+    m
+}
+
+/// Settings PHP actually uses: the generated base ini overlaid with every
+/// conf.d file in load (name) order.
+pub fn effective_settings(inst: &Installation) -> std::collections::BTreeMap<String, String> {
+    let mut m = parse_ini(&std::fs::read_to_string(inst.ini()).unwrap_or_default());
+    let mut files: Vec<PathBuf> = std::fs::read_dir(inst.conf_d())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "ini"))
+        .collect();
+    files.sort();
+    for f in files {
+        m.extend(parse_ini(&std::fs::read_to_string(f).unwrap_or_default()));
+    }
+    m
+}
+
+/// Only the user's own overrides (90-user.ini).
+pub fn user_settings(inst: &Installation) -> std::collections::BTreeMap<String, String> {
+    parse_ini(&std::fs::read_to_string(user_ini(inst)).unwrap_or_default())
+}
+
 /// All installed versions, newest first. A version counts as installed when
 /// both the CLI and FPM binaries exist.
 pub fn installed(paths: &Paths) -> std::io::Result<Vec<Installation>> {
@@ -374,6 +504,29 @@ pub(crate) mod tests {
             version: PhpVersion::parse(v).unwrap(),
             dir,
         }
+    }
+
+    #[test]
+    fn modules_build_and_effective_settings() {
+        assert_eq!(
+            parse_modules("[PHP Modules]\nCore\nmysqli\nPDO\n\n[Zend Modules]\n"),
+            vec!["core", "mysqli", "pdo"]
+        );
+        let t = tempfile::tempdir().unwrap();
+        let p = Paths::at(t.path());
+        let i = fake_install(&p, "8.3");
+        assert_eq!(build(&i), Build::Standard);
+        set_build(&i.dir, Build::Extended).unwrap();
+        assert_eq!(build(&i), Build::Extended);
+        write_configs(&p, &i, None).unwrap();
+        std::fs::write(i.conf_d().join("50-a.ini"), "memory_limit = 1G\n").unwrap();
+        set_user_ini(&i, "memory_limit", Some("2G")).unwrap();
+        set_user_ini(&i, "date.timezone", Some("\"Asia/Kathmandu\"")).unwrap();
+        let e = effective_settings(&i);
+        assert_eq!(e["memory_limit"], "2G", "90-user.ini loads last");
+        assert_eq!(e["post_max_size"], "512M", "base default");
+        assert_eq!(e["date.timezone"], "Asia/Kathmandu");
+        assert_eq!(user_settings(&i).len(), 2);
     }
 
     #[test]
