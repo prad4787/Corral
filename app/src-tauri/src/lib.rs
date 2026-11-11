@@ -63,6 +63,48 @@ struct CoreService {
     running: bool,
 }
 
+/// A database tool (Adminer, phpMyAdmin, pgweb, Redis Commander).
+#[derive(Serialize)]
+struct ToolView {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    host: String,
+    installed: bool,
+    running: bool,
+    /// Why it would not work right now, if anything.
+    note: Option<String>,
+}
+
+fn tool_views(paths: &Paths, cfg: &Config) -> Vec<ToolView> {
+    use corral_engine::tools::{self, Serve, Tool};
+    Tool::ALL
+        .into_iter()
+        .map(|t| {
+            let installed = t.installed(paths);
+            let running = installed
+                && match tools::serve(paths, t) {
+                    Some(Serve::Upstream(dial)) => dial
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse().ok())
+                        .is_some_and(tcp_up),
+                    Some(Serve::Php { php, .. }) => unix_up(&paths.fpm_socket(&php.to_string())),
+                    None => false,
+                };
+            ToolView {
+                id: t.id(),
+                label: t.label(),
+                description: t.description(),
+                host: t.host(&cfg.tld),
+                installed,
+                running,
+                note: tools::note(paths, t),
+            }
+        })
+        .collect()
+}
+
 /// Catalog entry for a service that can be added.
 #[derive(Serialize)]
 struct CatalogItem {
@@ -179,6 +221,7 @@ struct Overview {
     adminer: bool,
     mail_port: u16,
     core: Vec<CoreService>,
+    tools: Vec<ToolView>,
     catalog: Vec<CatalogItem>,
     /// (site, public url) for active shares.
     shares: Vec<(String, String)>,
@@ -251,6 +294,7 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         system: system.clone(),
         adminer: corral_engine::adminer::installed(paths),
         mail_port: cfg.mail_port,
+        tools: tool_views(paths, &cfg),
         core: {
             let engine_up = running || orphans::engine_running(paths);
             core_services(paths, &cfg, engine_up, system.ports)
@@ -860,6 +904,43 @@ fn adminer_remove(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Overv
     ov!(app, state)
 }
 
+#[tauri::command]
+async fn tool_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Overview> {
+    let t = corral_engine::tools::Tool::parse(&id).ok_or("unknown tool")?;
+    corral_engine::tools::install(&state.paths, t)
+        .await
+        .map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+#[tauri::command]
+fn tool_remove(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Overview> {
+    let t = corral_engine::tools::Tool::parse(&id).ok_or("unknown tool")?;
+    corral_engine::tools::remove(&state.paths, t).map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+/// Stop, then delete a service with its runtime, config, logs and (optionally) data.
+#[tauri::command]
+async fn service_uninstall(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    delete_data: bool,
+) -> CmdResult<Overview> {
+    let r = corral_services::uninstall(&state.paths, &name, delete_data)
+        .await
+        .map_err(err)?;
+    tracing::info!(service = %name, runtime = r.runtime, data = r.data, "service uninstalled");
+    ov!(app, state)
+}
+
 /// Start a public tunnel for a site (installing cloudflared on first use).
 #[tauri::command]
 async fn share_start(
@@ -1277,6 +1358,9 @@ pub fn run() {
             share_start,
             share_stop,
             check_update,
+            tool_install,
+            tool_remove,
+            service_uninstall,
             site_logs
         ])
         .build(tauri::generate_context!())

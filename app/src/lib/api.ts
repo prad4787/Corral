@@ -47,6 +47,7 @@ export interface Overview {
   adminer: boolean;
   mail_port: number;
   core: { id: string; name: string; detail: string; running: boolean }[];
+  tools: { id: string; label: string; description: string; host: string; installed: boolean; running: boolean; note: string | null }[];
   catalog: { kind: string; label: string; version: string; license: string; available: boolean; installed: boolean }[];
   shares: [string, string][];
 }
@@ -176,6 +177,10 @@ export const api = {
   shareStop: (site: string) => invoke<Overview>("share_stop", { site }),
   checkUpdate: () =>
     invoke<{ current: string; latest: string | null; newer: boolean; url: string | null }>("check_update"),
+  toolInstall: (id: string) => invoke<Overview>("tool_install", { id }),
+  toolRemove: (id: string) => invoke<Overview>("tool_remove", { id }),
+  serviceUninstall: (name: string, deleteData: boolean) =>
+    invoke<Overview>("service_uninstall", { name, deleteData }),
   uninstall: (deleteData: boolean) => invoke<void>("uninstall_corral", { deleteData }),
   eventsList: () => invoke<WatchEvent[]>("events_list", {}),
   eventsClear: () => invoke<void>("events_clear"),

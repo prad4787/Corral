@@ -57,6 +57,12 @@ const fullOverview = () => ({
     { id: "mail", name: "Mail catcher", detail: "SMTP 127.0.0.1:2525", running: true },
     { id: "dumps", name: "Dump server", detail: "dump() and watcher events", running: true },
   ],
+  tools: [
+    { id: "adminer", label: "Adminer", description: "One page for MySQL, PostgreSQL and SQLite.", host: "adminer.test", installed: true, running: true, note: null },
+    { id: "phpmyadmin", label: "phpMyAdmin", description: "Full MySQL administration.", host: "phpmyadmin.test", installed: false, running: false, note: "Needs PHP 8.3 or older with the mysqli extension (Corral’s own PHP builds include it)." },
+    { id: "pgweb", label: "pgweb", description: "PostgreSQL browser and SQL editor.", host: "pgweb.test", installed: false, running: false, note: "Add PostgreSQL to connect automatically." },
+    { id: "redis-commander", label: "Redis Commander", description: "Browse Redis/Valkey keys and run commands in its console.", host: "redis.test", installed: true, running: true, note: null },
+  ],
   catalog: [
     { kind: "mongodb", label: "MongoDB", version: "8.2.12", license: "SSPL", available: true, installed: false },
     { kind: "postgres", label: "PostgreSQL", version: "18.6", license: "PostgreSQL License", available: true, installed: false },

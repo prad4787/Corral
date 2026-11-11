@@ -1,6 +1,6 @@
 <!--
-  Everything Corral runs: its own core services (live status), databases and
-  caches (installed ones toggle, the rest install inline), and the database GUI.
+  Web server status, databases and caches (install, enable, remove
+  completely) and database tools (install, open, remove).
 -->
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,13 +10,14 @@
   import Button from "$lib/ui/Button.svelte";
   import Switch from "$lib/ui/Switch.svelte";
   import StatusDot from "$lib/ui/StatusDot.svelte";
+  import Sheet from "$lib/ui/Sheet.svelte";
   import { api } from "$lib/api";
   import { app } from "$lib/app.svelte";
 
   const d = $derived(app.data!);
   const engineUp = $derived(d.running || d.running_elsewhere);
+  const web = $derived(d.core.find((c) => c.id === "web"));
 
-  // What installing involves, so nobody is surprised by a long wait.
   const notes: Record<string, string> = {
     mysql: "About 170 MB download.",
     postgres: "Builds from verified source; takes a few minutes.",
@@ -27,25 +28,29 @@
   const notInstalled = $derived(
     d.catalog.filter((c) => !c.installed).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)),
   );
-  const coreUp = $derived(d.core.filter((c) => c.running).length);
+
+  // Removal sheet state.
+  let removing = $state<{ name: string; label: string } | null>(null);
+  let deleteData = $state(true);
 </script>
 
-<Toolbar title="Services" subtitle={engineUp ? `${coreUp} of ${d.core.length} core services running` : "Corral is stopped"} />
+<Toolbar title="Services" subtitle={engineUp ? "Everything runs on 127.0.0.1" : "Corral is stopped"} />
 
 <div class="pane">
-  <Group title="Core" footer="Run whenever Corral runs. Start or stop them from the sidebar.">
-    {#each d.core as c, i (c.name + i)}
-      <Row title={c.name} description={c.detail}>
-        {#snippet leading()}<StatusDot on={c.running} label={c.running ? "Running" : "Stopped"} />{/snippet}
-        <span class="state">{c.running ? "Running" : "Stopped"}</span>
+  {#if web}
+    <Group title="Web Server">
+      <Row title={web.name} description={web.detail}>
+        {#snippet leading()}<StatusDot on={web.running} label={web.running ? "Running" : "Stopped"} />{/snippet}
+        <span class="state">{web.running ? "Running" : "Stopped"}</span>
       </Row>
-    {/each}
-  </Group>
+    </Group>
+  {/if}
 
-  <Group title="Databases and Caches" footer="Listen on 127.0.0.1 only. Data stays in Corral’s folder until you remove it.">
+  <Group title="Databases and Caches" footer="Listen on 127.0.0.1 only. Removing a service stops it first and deletes its files.">
     {#each d.services as s (s.name)}
       <Row title={s.label} description="{s.name} · {s.version} · 127.0.0.1:{s.port}{s.enabled && !s.listening ? (engineUp ? ' · starting…' : ' · starts with Corral') : ''}">
         {#snippet leading()}<StatusDot on={s.listening} label={s.listening ? "Running" : "Not running"} />{/snippet}
+        <Button variant="plain" size="small" icon="trash" label="Remove {s.label}…" disabled={!!app.busy} onclick={() => { deleteData = true; removing = { name: s.name, label: s.label }; }} />
         <Switch label="Enable {s.label}" checked={s.enabled} disabled={!!app.busy} onchange={(v) => app.run("svc", () => api.setServiceEnabled(s.name, v))} />
       </Row>
     {/each}
@@ -59,18 +64,43 @@
     {/each}
   </Group>
 
-  <Group title="Database GUI" footer="Browse and edit MySQL, PostgreSQL and SQLite databases. Only reachable from this Mac.">
-    <Row title="Adminer" description={d.adminer ? `adminer.${d.tld}` : "Not installed"}>
-      {#snippet leading()}<StatusDot on={d.adminer && engineUp} label={d.adminer ? "Installed" : "Not installed"} />{/snippet}
-      {#if d.adminer}
-        <Button disabled={!!app.busy} onclick={() => app.run("adminer", api.adminerRemove)}>Remove</Button>
-        <Button variant="primary" onclick={() => openUrl(app.url(`adminer.${d.tld}`))}>Open</Button>
-      {:else}
-        <Button disabled={!!app.busy} onclick={() => app.run("adminer", () => api.install("adminer"))}>{app.busy === "adminer" ? "Installing…" : "Install"}</Button>
-      {/if}
-    </Row>
+  <Group title="Database Tools" footer="Each tool has its own address and is only reachable from this Mac.">
+    {#each d.tools as t (t.id)}
+      <Row title={t.label} description={t.installed ? (t.note ?? `${t.host} · ${t.description}`) : (t.note ? `${t.description} ${t.note}` : t.description)}>
+        {#snippet leading()}<StatusDot on={t.running} label={t.running ? "Running" : t.installed ? "Stopped" : "Not installed"} />{/snippet}
+        {#if t.installed}
+          <Button variant="plain" size="small" icon="trash" label="Remove {t.label}" disabled={!!app.busy} onclick={() => app.run("tool-" + t.id, () => api.toolRemove(t.id))} />
+          <Button variant="primary" disabled={!engineUp} onclick={() => openUrl(app.url(t.host))}>Open</Button>
+        {:else}
+          <Button disabled={!!app.busy} onclick={() => app.run("tool-" + t.id, () => api.toolInstall(t.id))}>
+            {app.busy === "tool-" + t.id ? "Installing…" : "Install"}
+          </Button>
+        {/if}
+      </Row>
+    {/each}
   </Group>
 </div>
+
+{#if removing}
+  <Sheet
+    title="Remove {removing.label}?"
+    message="Corral stops it, then deletes its program files, settings and logs."
+    onclose={() => (removing = null)}
+  >
+    <label class="check">
+      <input type="checkbox" bind:checked={deleteData} />
+      <span>Also delete its data<small>All databases and keys stored in “{removing.name}”. This can’t be undone.</small></span>
+    </label>
+    {#snippet buttons()}
+      <Button onclick={() => (removing = null)}>Cancel</Button>
+      <Button
+        variant="destructive"
+        disabled={!!app.busy}
+        onclick={() => { const r = removing!; app.run("rm-" + r.name, () => api.serviceUninstall(r.name, deleteData)).then((ok) => { if (ok) removing = null; }); }}
+      >{app.busy === "rm-" + removing?.name ? "Removing…" : "Remove"}</Button>
+    {/snippet}
+  </Sheet>
+{/if}
 
 <style>
   .pane {
@@ -80,6 +110,24 @@
   }
   .state {
     font-size: 12px;
+    color: var(--label-2);
+  }
+  .check {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    line-height: 17px;
+  }
+  .check input {
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+  }
+  .check span {
+    display: flex;
+    flex-direction: column;
+  }
+  .check small {
+    font-size: 11px;
     color: var(--label-2);
   }
 </style>
