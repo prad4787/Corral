@@ -89,6 +89,19 @@ pub fn plist_program(plist: &str) -> Option<PathBuf> {
     ))
 }
 
+/// Marker written by [`setup`] in this Corral home. Machine-wide files
+/// (/etc/resolver, the LaunchDaemon) are shared by every Corral home on the
+/// Mac, so only the home that installed them may remove them; a sandbox or
+/// test home must never undo the real setup.
+pub fn marker(paths: &Paths) -> PathBuf {
+    paths.root.join("system-integration")
+}
+
+/// True when this Corral home set up the system integration.
+pub fn owned(paths: &Paths) -> bool {
+    marker(paths).exists()
+}
+
 /// POSIX shell single-quoting.
 fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -309,6 +322,7 @@ pub fn setup(paths: &Paths, exe: &Path) -> anyhow::Result<Status> {
     cfg.http_port = 80;
     cfg.https_port = 443;
     cfg.save(paths)?;
+    std::fs::write(marker(paths), format!("tld={}\n", cfg.tld))?;
     Ok(status(paths, &cfg))
 }
 
@@ -327,12 +341,25 @@ pub fn undo(paths: &Paths) -> anyhow::Result<Status> {
     cfg.http_port = cfg.internal_http_port;
     cfg.https_port = cfg.internal_https_port;
     cfg.save(paths)?;
+    let _ = std::fs::remove_file(marker(paths));
     Ok(status(paths, &cfg))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_home_does_not_own_the_system_integration() {
+        let t = tempfile::tempdir().unwrap();
+        let p = Paths::at(t.path());
+        assert!(
+            !owned(&p),
+            "sandbox/test homes must never undo the real setup"
+        );
+        std::fs::write(marker(&p), "tld=test\n").unwrap();
+        assert!(owned(&p));
+    }
 
     #[test]
     fn quoting() {

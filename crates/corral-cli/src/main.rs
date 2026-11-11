@@ -1319,9 +1319,9 @@ fn uninstall(paths: &Paths, cfg: &Config, yes: bool, delete_data: bool) -> anyho
             k.display()
         );
     }
-    let sys = corral_system::status(paths, cfg);
-    let system_changes =
-        sys.dns || sys.ports || sys.https || corral_system::daemon_plist_path().exists();
+    // Machine-wide files are shared by every Corral home; only the home that
+    // installed them removes them (never a sandbox or test home).
+    let system_changes = corral_system::owned(paths);
     if system_changes {
         println!(
             "System integration (.{} DNS, HTTPS trust, ports 80/443) will be removed too.",
