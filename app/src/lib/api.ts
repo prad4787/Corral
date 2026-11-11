@@ -46,6 +46,8 @@ export interface Overview {
   system: SystemStatus;
   adminer: boolean;
   mail_port: number;
+  core: { id: string; name: string; detail: string; running: boolean }[];
+  catalog: { kind: string; label: string; version: string; license: string; available: boolean; installed: boolean }[];
   shares: [string, string][];
 }
 

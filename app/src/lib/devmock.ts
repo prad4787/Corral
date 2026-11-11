@@ -49,6 +49,20 @@ const fullOverview = () => ({
   system: { dns: true, dns_foreign: false, https: true, ports: true, ports_busy: false },
   adminer: true,
   mail_port: 2525,
+  core: [
+    { id: "web", name: "Web server (Caddy)", detail: "HTTPS 443 → 18443 · HTTP 80 → 18080", running: true },
+    { id: "dns", name: "DNS", detail: "*.test → 127.0.0.1 · UDP 15353", running: true },
+    { id: "php", name: "PHP-FPM 8.4", detail: "php-fpm-8.4.sock", running: true },
+    { id: "php", name: "PHP-FPM 8.3", detail: "php-fpm-8.3.sock", running: true },
+    { id: "mail", name: "Mail catcher", detail: "SMTP 127.0.0.1:2525", running: true },
+    { id: "dumps", name: "Dump server", detail: "dump() and watcher events", running: true },
+  ],
+  catalog: [
+    { kind: "mongodb", label: "MongoDB", version: "8.2.12", license: "SSPL", available: true, installed: false },
+    { kind: "postgres", label: "PostgreSQL", version: "18.6", license: "PostgreSQL License", available: true, installed: false },
+    { kind: "valkey", label: "Valkey (Redis-compatible)", version: "9.1.3", license: "BSD-3-Clause", available: true, installed: true },
+    { kind: "mysql", label: "MySQL", version: "8.4.11", license: "GPL-2.0", available: true, installed: true },
+  ],
   shares: [] as [string, string][],
 });
 

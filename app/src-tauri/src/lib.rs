@@ -54,6 +54,101 @@ struct ServiceView {
     listening: bool,
 }
 
+/// One of Corral's own background services, with live status.
+#[derive(Serialize)]
+struct CoreService {
+    id: &'static str,
+    name: String,
+    detail: String,
+    running: bool,
+}
+
+/// Catalog entry for a service that can be added.
+#[derive(Serialize)]
+struct CatalogItem {
+    kind: &'static str,
+    label: &'static str,
+    version: &'static str,
+    license: &'static str,
+    available: bool,
+    installed: bool,
+}
+
+fn tcp_up(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(80),
+    )
+    .is_ok()
+}
+
+fn unix_up(path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+fn core_services(paths: &Paths, cfg: &Config, engine_up: bool, ports_ok: bool) -> Vec<CoreService> {
+    let mut v = vec![CoreService {
+        id: "web",
+        name: "Web server (Caddy)".into(),
+        detail: if ports_ok {
+            format!(
+                "HTTPS 443 → {} · HTTP 80 → {}",
+                cfg.internal_https_port, cfg.internal_http_port
+            )
+        } else {
+            format!(
+                "HTTPS {} · HTTP {}",
+                cfg.internal_https_port, cfg.internal_http_port
+            )
+        },
+        running: tcp_up(cfg.internal_https_port),
+    }];
+    v.push(CoreService {
+        id: "dns",
+        name: "DNS".into(),
+        detail: format!("*.{} → 127.0.0.1 · UDP {}", cfg.tld, cfg.dns_port),
+        // UDP cannot be probed with a connect; the engine owns the resolver.
+        running: engine_up,
+    });
+    for inst in php::installed(paths).unwrap_or_default() {
+        let v_ = inst.version.to_string();
+        let sock = paths.fpm_socket(&v_);
+        v.push(CoreService {
+            id: "php",
+            name: format!("PHP-FPM {v_}"),
+            detail: format!(
+                "{}{}",
+                sock.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default(),
+                if php::xdebug_available(&inst) {
+                    " · Xdebug pool"
+                } else {
+                    ""
+                }
+            ),
+            running: unix_up(&sock),
+        });
+    }
+    if cfg.mail_port != 0 {
+        v.push(CoreService {
+            id: "mail",
+            name: "Mail catcher".into(),
+            detail: format!("SMTP 127.0.0.1:{}", cfg.mail_port),
+            running: tcp_up(cfg.mail_port),
+        });
+    }
+    if cfg.dumps {
+        v.push(CoreService {
+            id: "dumps",
+            name: "Dump server".into(),
+            detail: "dump() and watcher events".into(),
+            running: unix_up(&corral_dumps::socket_path(&paths.root)),
+        });
+    }
+    v
+}
+
 #[derive(Serialize)]
 struct NodeView {
     major: u32,
@@ -83,6 +178,8 @@ struct Overview {
     system: corral_system::Status,
     adminer: bool,
     mail_port: u16,
+    core: Vec<CoreService>,
+    catalog: Vec<CatalogItem>,
     /// (site, public url) for active shares.
     shares: Vec<(String, String)>,
 }
@@ -132,6 +229,7 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
             version,
         })
         .collect();
+    let system = corral_system::status(paths, &cfg);
     Ok(Overview {
         node,
         sites,
@@ -150,9 +248,29 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         http_port: cfg.http_port,
         https_port: cfg.https_port,
-        system: corral_system::status(paths, &cfg),
+        system: system.clone(),
         adminer: corral_engine::adminer::installed(paths),
         mail_port: cfg.mail_port,
+        core: {
+            let engine_up = running || orphans::engine_running(paths);
+            core_services(paths, &cfg, engine_up, system.ports)
+        },
+        catalog: {
+            let installed: Vec<corral_services::manifest::Kind> = ServicesFile::load(paths)
+                .map(|f| f.instances.values().map(|i| i.kind).collect())
+                .unwrap_or_default();
+            corral_services::manifest::RELEASES
+                .iter()
+                .map(|r| CatalogItem {
+                    kind: r.kind.as_str(),
+                    label: r.kind.label(),
+                    version: r.version,
+                    license: r.kind.license(),
+                    available: r.artifact().is_some(),
+                    installed: installed.contains(&r.kind),
+                })
+                .collect()
+        },
         shares: {
             let mut m = state.shares.lock().unwrap();
             m.retain(|_, sh| sh.alive());
