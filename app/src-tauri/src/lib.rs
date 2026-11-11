@@ -977,6 +977,23 @@ fn refresh_tray(app: &AppHandle) {
     }
 }
 
+/// `corral://open` and `corral://site/<name>`: bring the window forward and
+/// tell the UI which site to show.
+fn handle_deep_link(app: &AppHandle, url: &str) {
+    use tauri::Emitter;
+    show_main(app);
+    let rest = url.trim_start_matches("corral://").trim_end_matches('/');
+    if let Some(name) = rest.strip_prefix("site/") {
+        let name: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if !name.is_empty() {
+            let _ = app.emit("corral://site", name);
+        }
+    }
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -1045,6 +1062,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
@@ -1056,6 +1074,15 @@ pub fn run() {
         })
         .setup(|app| {
             build_tray(app)?;
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        handle_deep_link(&handle, url.as_str());
+                    }
+                });
+            }
             // GUI-first: serve sites as soon as the app opens (if set up).
             {
                 let handle = app.handle().clone();

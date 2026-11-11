@@ -33,6 +33,9 @@ pub struct Config {
     pub mail_port: u16,
     /// Send `dump()` output from PHP to Corral's dump viewer.
     pub dumps: bool,
+    /// Route every PHP request to the Xdebug pool while an IDE listens on
+    /// 127.0.0.1:9003 (otherwise only Xdebug-triggered requests).
+    pub xdebug_auto: bool,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             default_node: None,
             mail_port: 2525,
             dumps: true,
+            xdebug_auto: true,
         }
     }
 }

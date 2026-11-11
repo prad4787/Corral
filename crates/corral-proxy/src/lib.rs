@@ -35,6 +35,8 @@ pub struct ProxySite {
     /// Xdebug-enabled pool for the same PHP version, if available. Requests
     /// carrying an Xdebug trigger (cookie or query) are routed here.
     pub debug_socket: Option<PathBuf>,
+    /// Send every PHP request to the debug pool (an IDE is listening).
+    pub debug_all: bool,
     /// Present when the site is served over HTTPS.
     pub tls: Option<CertFiles>,
 }
@@ -92,6 +94,7 @@ pub fn proxy_sites(
                 front_controller: s.driver.front_controller.clone(),
                 fpm_socket,
                 debug_socket,
+                debug_all: false,
                 tls: s.secure.then(|| cert_for(&s.host)),
             }
         })
@@ -149,8 +152,13 @@ fn php_routes(site: &ProxySite, socket: &Path, fc: &str) -> Vec<Value> {
         }),
     ];
     if let Some(dbg) = &site.debug_socket {
+        let matcher = if site.debug_all {
+            json!([{ "path": ["*.php"] }])
+        } else {
+            xdebug_triggers()
+        };
         v.push(json!({
-            "match": xdebug_triggers(),
+            "match": matcher,
             "handle": [fastcgi(site, dbg)],
             "terminal": true
         }));
@@ -300,6 +308,7 @@ mod tests {
             front_controller: Some("index.php".into()),
             fpm_socket: Some("/c/run/php-fpm-8.4.sock".into()),
             debug_socket: None,
+            debug_all: false,
             tls: tls.then(|| CertFiles {
                 cert: format!("/c/certs/{host}.crt").into(),
                 key: format!("/c/certs/{host}.key").into(),
@@ -385,6 +394,7 @@ mod tests {
             front_controller: None,
             fpm_socket: None,
             debug_socket: None,
+            debug_all: false,
             tls: None,
         };
         let cfg = caddy_config(&settings(), &[missing, stat]);
@@ -427,6 +437,16 @@ mod tests {
                 .contains("XDEBUG_")
         );
         assert_eq!(m[1]["query"]["XDEBUG_SESSION_START"][0], "*");
+        // While an IDE listens, every PHP request goes to the debug pool.
+        let mut all = php_site("app.test", false);
+        all.debug_socket = Some("/c/run/php-fpm-8.4-debug.sock".into());
+        all.debug_all = true;
+        let cfg_all = caddy_config(&settings(), &[all]);
+        let sub = routes(&cfg_all, "corral_http")[0]["handle"][0]["routes"]
+            .as_array()
+            .unwrap();
+        let dbg = sub.iter().find(|r| r["terminal"] == true).unwrap();
+        assert_eq!(dbg["match"], json!([{ "path": ["*.php"] }]));
         // Without a debug pool there is no trigger route.
         let plain = caddy_config(&settings(), &[php_site("b.test", false)]);
         assert!(!plain.to_string().contains("XDEBUG"));

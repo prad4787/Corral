@@ -104,6 +104,7 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
             front_controller: Some("index.php".into()),
             fpm_socket: Some(paths.fpm_socket(&versions[0].to_string())),
             debug_socket: None,
+            debug_all: false,
             tls: Some(CertFiles {
                 cert: f.cert,
                 key: f.key,
@@ -123,6 +124,11 @@ pub fn render(paths: &Paths) -> anyhow::Result<Rendered> {
     });
     let adminer_fpm = adminer.as_ref().map(|_| versions[0].to_string());
     proxy_sites.extend(adminer);
+    if ide_listening(&cfg) {
+        for ps in proxy_sites.iter_mut().filter(|p| p.debug_socket.is_some()) {
+            ps.debug_all = true;
+        }
+    }
     let settings = ProxySettings::from_config(paths, &cfg);
     let caddy = corral_proxy::caddy_config(&settings, &proxy_sites);
     let caddy_path = caddy_config_path(paths);
@@ -268,6 +274,16 @@ async fn restart_fpm(paths: &Paths, sup: &Supervisor, versions: &[String]) -> an
         }
     }
     Ok(())
+}
+
+/// An IDE (PhpStorm, VS Code PHP Debug…) is waiting for Xdebug on 9003.
+pub fn ide_listening(cfg: &Config) -> bool {
+    cfg.xdebug_auto
+        && std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], 9003)),
+            Duration::from_millis(50),
+        )
+        .is_ok()
 }
 
 /// Wait until a unix socket accepts connections.
@@ -498,6 +514,9 @@ pub async fn run(
         async move {
             let mut last = mtimes(&paths);
             let mut last_user_ini = user_ini_fingerprints(&paths);
+            let mut last_ide = Config::load(&paths)
+                .map(|c| ide_listening(&c))
+                .unwrap_or(false);
             let mut last_pids = Vec::new();
             loop {
                 let pids: Vec<u32> = sup
@@ -527,6 +546,17 @@ pub async fn run(
                     last_user_ini = user_ini;
                     if let Err(e) = restart_fpm(&paths, &sup, &changed).await {
                         tracing::error!(error = %e, "fpm restart failed");
+                    }
+                }
+                // IDE started/stopped listening: re-route PHP (Caddy reloads on file change).
+                let ide = Config::load(&paths)
+                    .map(|c| ide_listening(&c))
+                    .unwrap_or(false);
+                if ide != last_ide {
+                    last_ide = ide;
+                    tracing::info!(listening = ide, "Xdebug client on 9003 changed; re-routing");
+                    if let Err(e) = render(&paths) {
+                        tracing::error!(error = %e, "render failed");
                     }
                 }
                 let now = mtimes(&paths);

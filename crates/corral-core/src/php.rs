@@ -218,7 +218,9 @@ pub fn fpm_debug_args(inst: &Installation) -> Vec<String> {
     for d in [
         format!("zend_extension={}", xdebug_so(inst).display()),
         "xdebug.mode=debug,develop".into(),
-        "xdebug.start_with_request=trigger".into(),
+        // Only Xdebug-routed requests reach this pool (triggers, or every
+        // request while the IDE listens), so always start a session.
+        "xdebug.start_with_request=yes".into(),
         "xdebug.client_host=127.0.0.1".into(),
         "xdebug.client_port=9003".into(),
         "max_execution_time=0".into(),
@@ -388,9 +390,7 @@ pub(crate) mod tests {
         let c = std::fs::read_to_string(fpm_debug_conf_path(&i)).unwrap();
         assert!(c.contains(&format!("listen = {}", p.fpm_debug_socket("8.4").display())));
         let args = fpm_debug_args(&i).join(" ");
-        assert!(
-            args.contains("zend_extension=") && args.contains("xdebug.start_with_request=trigger")
-        );
+        assert!(args.contains("zend_extension=") && args.contains("xdebug.start_with_request=yes"));
     }
 
     #[test]

@@ -237,6 +237,11 @@
 
   onMount(() => {
     run("load", api.overview);
+    // corral://site/<name> links from the OS.
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<string>("corral://site", (e) => selectSite(e.payload)).then((u) => (unlisten = u)),
+    );
     // One quiet check per launch; failures (offline) are ignored.
     api.checkUpdate().then((u) => (update = u)).catch(() => {});
     // Pick up changes made from the CLI.
@@ -245,7 +250,10 @@
       api.overview().then((d) => (data = d)).catch(() => {});
       refreshInbox();
     }, 3000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      unlisten?.();
+    };
   });
 </script>
 
