@@ -45,22 +45,27 @@ pub fn option_file(paths: &Paths, name: &str, inst: &Instance) -> String {
          \n\
          [client]\n\
          socket={sock}\n\
-         user=root\n",
+         user=root\n{client_pw}",
         basedir = q(&dist),
         datadir = q(&store::data_dir(paths, name)),
         port = inst.port,
         sock = q(&store::socket(paths, name)),
         pid = q(&paths.run_dir().join(format!("{name}.pid"))),
         err = q(&paths.logs_dir().join(format!("service-{name}.err.log"))),
+        // Passwords are restricted to characters that need no escaping here.
+        client_pw = crate::auth::password(paths, name)
+            .map(|pw| format!("password=\"{pw}\"\n"))
+            .unwrap_or_default(),
     )
 }
 
 /// Write the option file; true when it changed (the server must restart).
 pub fn write_option_file(paths: &Paths, name: &str, inst: &Instance) -> std::io::Result<bool> {
-    write_if_changed(
-        &store::conf_file(paths, name),
-        option_file(paths, name, inst).as_bytes(),
-    )
+    let file = store::conf_file(paths, name);
+    let changed = write_if_changed(&file, option_file(paths, name, inst).as_bytes())?;
+    // May hold the root password; mysqld and the clients run as this user.
+    crate::auth::make_private(&file)?;
+    Ok(changed)
 }
 
 fn defaults_arg(paths: &Paths, name: &str) -> String {
@@ -134,6 +139,16 @@ pub fn valid_db_name(db: &str) -> bool {
         && db
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Run SQL as root over the unix socket (stdin, never argv).
+pub async fn run_sql(
+    paths: &Paths,
+    name: &str,
+    inst: &Instance,
+    sql: &str,
+) -> anyhow::Result<String> {
+    run_client(paths, name, inst, sql).await
 }
 
 async fn run_client(

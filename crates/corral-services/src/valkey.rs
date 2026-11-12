@@ -26,18 +26,21 @@ pub fn config(paths: &Paths, name: &str, inst: &Instance) -> String {
          dbfilename dump.rdb\n\
          save 3600 1 300 100 60 10000\n\
          appendonly no\n\
-         databases 16\n",
+         databases 16\n{auth}",
         port = inst.port,
         sock = q(&store::socket(paths, name)),
         dir = q(&store::data_dir(paths, name)),
+        auth = crate::auth::password(paths, name)
+            .map(|pw| format!("requirepass \"{pw}\"\n"))
+            .unwrap_or_default(),
     )
 }
 
 pub fn write_config(paths: &Paths, name: &str, inst: &Instance) -> std::io::Result<bool> {
-    write_if_changed(
-        &store::conf_file(paths, name),
-        config(paths, name, inst).as_bytes(),
-    )
+    let file = store::conf_file(paths, name);
+    let changed = write_if_changed(&file, config(paths, name, inst).as_bytes())?;
+    crate::auth::make_private(&file)?;
+    Ok(changed)
 }
 
 pub fn prepare(paths: &Paths, name: &str, inst: &Instance) -> anyhow::Result<()> {

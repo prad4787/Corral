@@ -29,11 +29,11 @@ const overview = () => setupPreview ? {
 
 const fullOverview = () => ({
   sites,
-  node: [{ major: 24, version: "v24.11.0", is_default: true }],
+  node: [{ major: 24, version: "v24.11.0", is_default: true }, { major: 22, version: "v22.21.1", is_default: false }],
   php: [{ version: "8.4", is_default: true, build: "standard" }, { version: "8.3", is_default: false, build: "extended" }],
   services: [
-    { name: "mysql", kind: "mysql", label: "MySQL", version: "8.4.11", port: 3306, enabled: true, listening: true },
-    { name: "valkey", kind: "valkey", label: "Valkey (Redis-compatible)", version: "9.1.3", port: 6379, enabled: false, listening: false },
+    { name: "mysql", kind: "mysql", label: "MySQL", version: "8.4.11", port: 3306, enabled: true, listening: true, extras_missing: false, secured: false },
+    { name: "valkey", kind: "valkey", label: "Valkey (Redis-compatible)", version: "9.1.3", port: 6379, enabled: false, listening: false, extras_missing: false, secured: false },
   ],
   tld: "test",
   parked: ["/Users/dev/Code"],
@@ -120,6 +120,13 @@ const handlers: Record<string, (args: any) => unknown> = {
     overrides: { post_max_size: "256M" },
   }),
   set_php_settings: () => null,
+  backup_options: ({ name }) => name === "valkey"
+    ? { formats: [{ id: "rdb", label: "RDB snapshot (.rdb)", extension: "rdb", whole_server: true }], databases: [], per_database: false, unavailable: null }
+    : { formats: [{ id: "sql", label: "SQL (.sql)", extension: "sql", whole_server: true }, { id: "sql-gz", label: "Compressed SQL (.sql.gz)", extension: "sql.gz", whole_server: true }], databases: ["ecommerce", "elbilling"], per_database: true, unavailable: null },
+  backup_database: () => 1843200,
+  service_connection: ({ name }) => ({ host: "127.0.0.1", port: name === "valkey" ? 6379 : 3306, user: name === "valkey" ? null : "root", password: null, can_secure: true, url: name === "valkey" ? "redis://127.0.0.1:6379" : "mysql://root@127.0.0.1:3306", env: "DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=laravel\nDB_USERNAME=root\nDB_PASSWORD=", note: null }),
+  generate_password: () => "Xk7mPq2RtVw9Yz3BcDf4GhJn",
+  restore_database: () => null,
   read_php_ini: () => "; Your PHP overrides\nmemory_limit = 1G\n",
 };
 

@@ -104,6 +104,8 @@ pub enum SupervisorError {
 }
 
 struct Handle {
+    /// What the process was started with, to detect configuration changes.
+    spec: Spec,
     state: watch::Receiver<State>,
     stop: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
@@ -237,10 +239,12 @@ impl Supervisor {
         let (tx, rx) = watch::channel(State::Starting);
         let stop = Arc::new(Notify::new());
         let name = spec.name.clone();
+        let started = spec.clone();
         let task = tokio::spawn(run(spec, tx, stop.clone()));
         map.insert(
             name,
             Handle {
+                spec: started,
                 state: rx,
                 stop,
                 task,
@@ -276,6 +280,11 @@ impl Supervisor {
         for n in names {
             let _ = self.stop(&n).await;
         }
+    }
+
+    /// The spec a supervised process was started with.
+    pub async fn spec(&self, name: &str) -> Option<Spec> {
+        self.inner.lock().await.get(name).map(|h| h.spec.clone())
     }
 
     pub async fn state(&self, name: &str) -> Option<State> {

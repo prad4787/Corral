@@ -4,7 +4,6 @@
   import Row from "$lib/ui/Row.svelte";
   import Button from "$lib/ui/Button.svelte";
   import Switch from "$lib/ui/Switch.svelte";
-  import Menu from "$lib/ui/Menu.svelte";
   import Sheet from "$lib/ui/Sheet.svelte";
   import StatusDot from "$lib/ui/StatusDot.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -18,9 +17,6 @@
 
   let confirmUninstall = $state(false);
   let deleteData = $state(false);
-
-  const phpChoices = ["8.5", "8.4", "8.3", "8.2"];
-  const nodeChoices = [24, 22];
 </script>
 
 <Toolbar title="Settings" />
@@ -50,50 +46,6 @@
     <Row title=".{d.tld} domains" description="Resolved by Corral’s DNS server.">{#snippet leading()}<StatusDot on={sys.dns} label={sys.dns ? "On" : "Off"} />{/snippet}</Row>
     <Row title="Trusted certificates" description="Corral’s local certificate authority, valid only for .{d.tld}.">{#snippet leading()}<StatusDot on={sys.https} label={sys.https ? "On" : "Off"} />{/snippet}</Row>
     <Row title="Standard ports" description={sys.ports ? "Ports 80 and 443." : `Using ${d.http_port} and ${d.https_port}.`}>{#snippet leading()}<StatusDot on={sys.ports} label={sys.ports ? "On" : "Off"} />{/snippet}</Row>
-  </Group>
-
-  <Group title="PHP" footer="Upload size, memory, timeouts, error display and extensions are set per version.">
-    {#snippet actions()}
-      <Menu
-        label="Install PHP Version"
-        align="right"
-        disabled={!!app.busy}
-        items={phpChoices.map((v) => ({ label: `PHP ${v}`, disabled: d.php.some((p) => p.version === v), onselect: () => app.run("php", () => api.install("php", v)) }))}
-      />
-    {/snippet}
-    {#each d.php as p (p.version)}
-      <Row title="PHP {p.version}" description="{p.build === 'extended' ? 'Extended build' : 'Standard build'}{p.is_default ? ' · Default' : ''}">
-        {#if !p.is_default}
-          <Button size="small" disabled={!!app.busy} onclick={() => app.run("defphp", () => api.setDefaultPhp(p.version))}>Make Default</Button>
-        {/if}
-        <Button size="small" onclick={() => { app.phpVersion = p.version; app.view = "php"; }}>Settings & Extensions…</Button>
-      </Row>
-    {:else}
-      <Row title="No PHP installed" description="Use the + button to install a version." />
-    {/each}
-  </Group>
-
-  <Group title="Node.js">
-    {#snippet actions()}
-      <Menu
-        label="Install Node.js Version"
-        align="right"
-        disabled={!!app.busy}
-        items={[
-          { label: "Latest LTS", onselect: () => app.run("node", () => api.nodeInstall()) },
-          ...nodeChoices.map((m) => ({ label: `Node.js ${m}`, disabled: d.node.some((n) => n.major === m), onselect: () => app.run("node", () => api.nodeInstall(m)) })),
-        ]}
-      />
-    {/snippet}
-    {#each d.node as n (n.major)}
-      <Row title="Node.js {n.version || n.major}" description={n.is_default ? "Default" : undefined}>
-        {#if !n.is_default}
-          <Button size="small" disabled={!!app.busy} onclick={() => app.run("nodeuse", () => api.nodeUse(n.major))}>Make Default</Button>
-        {/if}
-      </Row>
-    {:else}
-      <Row title="No Node.js installed" description="Use the + button to install a version." />
-    {/each}
   </Group>
 
   <Group title="Folders" footer="Every project inside these folders is served automatically.">

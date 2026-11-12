@@ -10,6 +10,7 @@
   const nav: { view: View; label: string; icon: IconName }[] = [
     { view: "sites", label: "All Sites", icon: "globe" },
     { view: "services", label: "Services", icon: "database" },
+    { view: "runtimes", label: "PHP & Node", icon: "layers" },
     { view: "mail", label: "Mail", icon: "mail" },
     { view: "dumps", label: "Dumps", icon: "activity" },
   ];
@@ -30,7 +31,7 @@
         <li>
           <button
             class="item"
-            class:selected={app.view === n.view || (n.view === "sites" && app.view === "site" && !app.selected)}
+            class:selected={app.view === n.view || (n.view === "sites" && app.view === "site" && !app.selected) || (n.view === "runtimes" && app.view === "php")}
             onclick={() => (app.view = n.view)}
           >
             <Icon name={n.icon} size={15} />

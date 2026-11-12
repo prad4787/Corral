@@ -25,6 +25,19 @@ export interface Service {
   port: number;
   enabled: boolean;
   listening: boolean;
+  extras_missing: boolean;
+  secured: boolean;
+}
+
+export interface Connection {
+  host: string;
+  port: number;
+  user: string | null;
+  password: string | null;
+  can_secure: boolean;
+  url: string;
+  env: string;
+  note: string | null;
 }
 
 export interface Overview {
@@ -138,7 +151,28 @@ export type PhpDetails = {
   overrides: Record<string, string>;
 };
 
+export type BackupFormat = "sql" | "sql-gz" | "pg-custom" | "rdb" | "mongo-archive";
+
+export interface BackupOptions {
+  formats: { id: BackupFormat; label: string; extension: string; whole_server: boolean }[];
+  databases: string[];
+  per_database: boolean;
+  unavailable: string | null;
+}
+
 export const api = {
+  serviceConnection: (name: string) => invoke<Connection>("service_connection", { name }),
+  setServicePassword: (name: string, password: string | null) =>
+    invoke<Overview>("set_service_password", { name, password }),
+  generatePassword: () => invoke<string>("generate_password"),
+  installServiceExtras: (name: string) => invoke<Overview>("install_service_extras", { name }),
+  backupOptions: (name: string) => invoke<BackupOptions>("backup_options", { name }),
+  backupDatabase: (name: string, database: string | null, format: BackupFormat, dest: string) =>
+    invoke<number>("backup_database", { name, database, format, dest }),
+  restoreDatabase: (name: string, database: string | null, file: string) =>
+    invoke<void>("restore_database", { name, database, file }),
+  phpRemove: (version: string) => invoke<Overview>("php_remove", { version }),
+  nodeRemove: (major: number) => invoke<Overview>("node_remove", { major }),
   overview: () => invoke<Overview>("overview"),
   park: (dir: string) => invoke<Overview>("park", { dir }),
   unpark: (dir: string) => invoke<Overview>("unpark", { dir }),

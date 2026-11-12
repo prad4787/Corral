@@ -83,6 +83,9 @@ pub struct Build {
     pub configure: Option<&'static [&'static str]>,
     pub make_args: &'static [&'static str],
     pub binaries: &'static [&'static str],
+    /// Subdirectories built and installed after the main tree (e.g.
+    /// PostgreSQL's `contrib` extensions).
+    pub extras: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +124,7 @@ const VALKEY_SRC: Artifact = Artifact {
         configure: None,
         make_args: &["BUILD_TLS=no", "MALLOC=libc"],
         binaries: &["src/valkey-server", "src/valkey-cli"],
+        extras: &[],
     }),
 };
 
@@ -131,9 +135,13 @@ const POSTGRES_SRC: Artifact = Artifact {
     provenance: "2026-11-10: from postgresql-18.6.tar.gz.sha256 on ftp.postgresql.org",
     build: Some(Build {
         // ICU and readline are optional; skipping them avoids Homebrew deps.
-        configure: Some(&["--without-icu", "--without-readline"]),
+        // macOS libc has the e2fs-style uuid API that uuid-ossp needs.
+        configure: Some(&["--without-icu", "--without-readline", "--with-uuid=e2fs"]),
         make_args: &[],
         binaries: &[],
+        // dblink, hstore, pg_trgm, uuid-ossp, postgres_fdw, citext, …
+        // (pgcrypto and sslinfo need OpenSSL and are skipped by contrib's Makefile.)
+        extras: &["contrib"],
     }),
 };
 

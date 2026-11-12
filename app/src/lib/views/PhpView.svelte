@@ -149,9 +149,9 @@
 </Toolbar>
 
 <div class="pane">
-  <button class="back" onclick={() => (app.view = "settings")}>
+  <button class="back" onclick={() => (app.view = "runtimes")}>
     <svg width="7" height="12" viewBox="0 0 7 12" aria-hidden="true"><path d="M6 1 1 6l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
-    Settings
+    PHP & Node
   </button>
 
   {#if !details}

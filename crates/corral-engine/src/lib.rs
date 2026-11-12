@@ -449,6 +449,12 @@ async fn sync_processes(paths: &Paths, sup: &Supervisor, sites: &[Site]) -> anyh
         if !running.contains(&spec.name) {
             tracing::info!(process = %spec.name, "starting site process");
             sup.start(spec).await?;
+        } else if spec.name.starts_with("tool-")
+            && sup.spec(&spec.name).await.is_some_and(|s| s != spec)
+        {
+            // E.g. a database password changed: restart with the new settings.
+            tracing::info!(process = %spec.name, "configuration changed; restarting");
+            sup.restart(spec).await?;
         }
     }
     Ok(())

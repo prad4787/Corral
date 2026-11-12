@@ -3,6 +3,8 @@
 //! supervisor, listen on 127.0.0.1 only, and keep their data in
 //! `services/data/<name>/`.
 
+pub mod auth;
+pub mod backup;
 pub mod manifest;
 pub mod mongodb;
 pub mod mysql;
@@ -24,51 +26,121 @@ pub async fn install(paths: &Paths, release: &Release) -> anyhow::Result<PathBuf
     if dist.join("bin").is_dir() {
         return Ok(dist);
     }
-    let art = release.artifact().with_context(|| {
-        format!(
-            "{} {} has no pinned build for this CPU yet",
-            release.kind.label(),
-            release.version
-        )
-    })?;
-    let expected = corral_fetch::Expected {
-        algo: corral_fetch::Hash::Sha256,
-        hex: art.sha256.into(),
-    };
-    let archive =
-        corral_fetch::fetch_verified(art.url, &paths.downloads_dir(), Some(&expected)).await?;
+    let art = artifact(release)?;
     // Source builds extract into a scratch tree, binary releases straight into dist.
     let target = match art.build {
-        Some(_) => paths.root.join("services/build").join(format!(
-            "{}-{}",
-            release.kind.as_str(),
-            release.version
-        )),
+        Some(_) => {
+            let t = build_dir(paths, release);
+            // Leftovers from an interrupted build would confuse make.
+            let _ = std::fs::remove_dir_all(&t);
+            t
+        }
         None => dist.clone(),
     };
-    let extracted = tokio::task::spawn_blocking({
-        let (archive, target) = (archive.clone(), target.clone());
-        let strip = art.strip;
-        move || corral_fetch::extract_tree(&archive, &target, strip)
-    })
-    .await?;
-    let _ = std::fs::remove_file(&archive);
-    extracted?;
+    fetch_into(paths, art, &target).await?;
     if let Some(build) = art.build {
-        let result = compile(&target, &dist, build).await;
+        let result = compile(&target, &dist, build, true).await;
         let _ = std::fs::remove_dir_all(&target);
         result?;
     }
     Ok(dist)
 }
 
+fn artifact(release: &Release) -> anyhow::Result<&manifest::Artifact> {
+    release.artifact().with_context(|| {
+        format!(
+            "{} {} has no pinned build for this CPU yet",
+            release.kind.label(),
+            release.version
+        )
+    })
+}
+
+/// Scratch tree for a source build. Not under `paths.root`: Corral's data
+/// lives in "Application Support", and some makefiles (Valkey's Lua module)
+/// break on the space. macOS's per-user `$TMPDIR` is private (0700) and has
+/// no spaces; fall back to Corral's own dir only if it somehow does.
+fn build_dir(paths: &Paths, release: &Release) -> PathBuf {
+    let name = format!("corral-build-{}-{}", release.kind.as_str(), release.version);
+    let tmp = std::env::temp_dir();
+    if tmp.is_absolute() && !tmp.to_string_lossy().contains(char::is_whitespace) {
+        tmp.join(name)
+    } else {
+        paths.root.join("services/build").join(name)
+    }
+}
+
+/// Download (digest-verified) and extract an artifact into `target`.
+async fn fetch_into(
+    paths: &Paths,
+    art: &manifest::Artifact,
+    target: &std::path::Path,
+) -> anyhow::Result<()> {
+    let expected = corral_fetch::Expected {
+        algo: corral_fetch::Hash::Sha256,
+        hex: art.sha256.into(),
+    };
+    let archive =
+        corral_fetch::fetch_verified(art.url, &paths.downloads_dir(), Some(&expected)).await?;
+    let extracted = tokio::task::spawn_blocking({
+        let (archive, target) = (archive.clone(), target.to_path_buf());
+        let strip = art.strip;
+        move || corral_fetch::extract_tree(&archive, &target, strip)
+    })
+    .await?;
+    let _ = std::fs::remove_file(&archive);
+    extracted
+}
+
+/// True when the optional extras of an installed service (PostgreSQL's
+/// contrib extensions) are present. Kinds without extras always are.
+pub fn extras_installed(paths: &Paths, inst: &Instance) -> bool {
+    match inst.kind {
+        Kind::Postgres => store::dist_dir(paths, inst.kind, &inst.version)
+            .join("share/extension/dblink.control")
+            .is_file(),
+        _ => true,
+    }
+}
+
+/// Add the extras to an existing install without touching the running
+/// server: build the tree in scratch space, then install only the extras
+/// subdirectories (new files next to the server's, never over its binaries).
+pub async fn install_extras(paths: &Paths, name: &str) -> anyhow::Result<()> {
+    let inst = ServicesFile::load(paths)?.get(name)?.clone();
+    if extras_installed(paths, &inst) {
+        return Ok(());
+    }
+    let release = manifest::find(inst.kind, Some(&inst.version)).with_context(|| {
+        format!(
+            "{} {} is not in the catalog",
+            inst.kind.label(),
+            inst.version
+        )
+    })?;
+    let art = artifact(release)?;
+    let build = art
+        .build
+        .filter(|b| !b.extras.is_empty())
+        .with_context(|| format!("{} has no optional extensions", inst.kind.label()))?;
+    let dist = store::dist_dir(paths, inst.kind, &inst.version);
+    let target = build_dir(paths, release);
+    let _ = std::fs::remove_dir_all(&target);
+    fetch_into(paths, art, &target).await?;
+    let result = compile(&target, &dist, build, false).await;
+    let _ = std::fs::remove_dir_all(&target);
+    result
+}
+
 /// Build from source: `./configure --prefix=<dist>` + `make` + `make
-/// install` when the recipe has a configure step, otherwise `make` and copy
-/// the listed binaries into `dist/bin`.
+/// install` (only with `install_core`) and then each `extras` subdirectory,
+/// when the recipe has a configure step; otherwise `make` and copy the
+/// listed binaries into `dist/bin`.
 async fn compile(
     src: &std::path::Path,
     dist: &std::path::Path,
     build: manifest::Build,
+    install_core: bool,
 ) -> anyhow::Result<()> {
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     tracing::info!(dir = %src.display(), jobs, "compiling from source");
@@ -83,7 +155,13 @@ async fn compile(
         args.extend(conf.iter().map(|s| s.to_string()));
         build_step(src, "./configure", &args).await?;
         build_step(src, "/usr/bin/make", &make(&[])).await?;
-        build_step(src, "/usr/bin/make", &make(&["install"])).await?;
+        if install_core {
+            build_step(src, "/usr/bin/make", &make(&["install"])).await?;
+        }
+        for dir in build.extras {
+            build_step(src, "/usr/bin/make", &make(&["-C", dir])).await?;
+            build_step(src, "/usr/bin/make", &make(&["-C", dir, "install"])).await?;
+        }
         return Ok(());
     }
     build_step(src, "/usr/bin/make", &make(&[])).await?;
@@ -269,12 +347,16 @@ fn write_valkey_shims(paths: &Paths, file: &ServicesFile) -> std::io::Result<()>
     for tool in ["valkey-cli", "redis-cli"] {
         let shim = paths.bin.join(tool);
         match first {
-            Some((_, inst)) => {
+            Some((name, inst)) => {
                 let dist = store::dist_dir(paths, inst.kind, &inst.version);
+                // The password is read when the shim runs (never stored in it).
                 let body = format!(
-                    "#!/bin/sh\n# Generated by Corral.\nexec \"{}\" -h 127.0.0.1 -p {} \"$@\"\n",
+                    "#!/bin/sh\n# Generated by Corral.\n\
+                     if [ -r \"{secret}\" ]; then REDISCLI_AUTH=\"$(cat \"{secret}\")\"; export REDISCLI_AUTH; fi\n\
+                     exec \"{}\" -h 127.0.0.1 -p {} \"$@\"\n",
                     dist.join("bin/valkey-cli").display(),
-                    inst.port
+                    inst.port,
+                    secret = auth::secret_file(paths, name).display(),
                 );
                 corral_core::fsutil::write_if_changed(&shim, body.as_bytes())?;
                 std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;

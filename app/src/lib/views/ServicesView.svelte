@@ -11,7 +11,10 @@
   import Switch from "$lib/ui/Switch.svelte";
   import StatusDot from "$lib/ui/StatusDot.svelte";
   import Sheet from "$lib/ui/Sheet.svelte";
-  import { api } from "$lib/api";
+  import BackupSheet from "./BackupSheet.svelte";
+  import ConnectionSheet from "./ConnectionSheet.svelte";
+  import Menu from "$lib/ui/Menu.svelte";
+  import { api, type Service } from "$lib/api";
   import { app } from "$lib/app.svelte";
 
   const d = $derived(app.data!);
@@ -31,6 +34,8 @@
 
   // Removal sheet state.
   let removing = $state<{ name: string; label: string } | null>(null);
+  let connecting = $state<Service | null>(null);
+  let backup = $state<{ service: Service; mode: "backup" | "restore" } | null>(null);
   let deleteData = $state(true);
 </script>
 
@@ -46,13 +51,36 @@
     </Group>
   {/if}
 
-  <Group title="Databases and Caches" footer="Listen on 127.0.0.1 only. Removing a service stops it first and deletes its files.">
+  <Group title="Databases and Caches" footer="Listen on 127.0.0.1 only. Connect… shows the login details and lets you set a password. Back up and restore while a service is running. Removing a service stops it first and deletes its files.">
     {#each d.services as s (s.name)}
-      <Row title={s.label} description="{s.name} · {s.version} · 127.0.0.1:{s.port}{s.enabled && !s.listening ? (engineUp ? ' · starting…' : ' · starts with Corral') : ''}">
+      <Row title={s.label} description="{s.name} · {s.version} · 127.0.0.1:{s.port}{s.secured ? ' · Password protected' : ''}{s.enabled && !s.listening ? (engineUp ? ' · starting…' : ' · starts with Corral') : ''}">
         {#snippet leading()}<StatusDot on={s.listening} label={s.listening ? "Running" : "Not running"} />{/snippet}
-        <Button variant="plain" size="small" icon="trash" label="Remove {s.label}…" disabled={!!app.busy} onclick={() => { deleteData = true; removing = { name: s.name, label: s.label }; }} />
+        <Button size="small" onclick={() => (connecting = s)}>Connect…</Button>
+        <Menu
+          icon="chevron-down"
+          label="More actions for {s.label}"
+          align="right"
+          disabled={!!app.busy}
+          items={[
+            { label: "Back Up…", disabled: !s.listening, onselect: () => (backup = { service: s, mode: "backup" }) },
+            { label: "Restore…", disabled: !s.listening, onselect: () => (backup = { service: s, mode: "restore" }) },
+            { label: `Remove ${s.label}…`, separator: true, onselect: () => { deleteData = true; removing = { name: s.name, label: s.label }; } },
+          ]}
+        />
         <Switch label="Enable {s.label}" checked={s.enabled} disabled={!!app.busy} onchange={(v) => app.run("svc", () => api.setServiceEnabled(s.name, v))} />
       </Row>
+      {#if s.extras_missing}
+        <Row
+          title="{s.label} extensions"
+          description={app.busy === "extras-" + s.name
+            ? "Building from verified source. Takes a few minutes; the server keeps running."
+            : "dblink, hstore, pg_trgm, uuid-ossp, citext, postgres_fdw and more aren’t installed. Backups that use them can’t be restored."}
+        >
+          <Button disabled={!!app.busy} onclick={() => app.run("extras-" + s.name, () => api.installServiceExtras(s.name)).then((ok) => { if (ok) app.notice = `${s.label} extensions are installed.`; })}>
+            {app.busy === "extras-" + s.name ? "Building…" : "Install Extensions"}
+          </Button>
+        </Row>
+      {/if}
     {/each}
     {#each notInstalled as c (c.kind)}
       <Row title={c.label} description={c.available ? `${c.version} · ${notes[c.kind] ?? ""}` : "Not available for this Mac yet."}>
@@ -80,6 +108,18 @@
     {/each}
   </Group>
 </div>
+
+{#if connecting}
+  {#key connecting.name}
+    <ConnectionSheet service={d.services.find((x) => x.name === connecting!.name) ?? connecting} onclose={() => (connecting = null)} />
+  {/key}
+{/if}
+
+{#if backup}
+  {#key backup}
+    <BackupSheet service={backup.service} mode={backup.mode} onclose={() => (backup = null)} />
+  {/key}
+{/if}
 
 {#if removing}
   <Sheet

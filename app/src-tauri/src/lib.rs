@@ -53,6 +53,10 @@ struct ServiceView {
     port: u16,
     enabled: bool,
     listening: bool,
+    /// Optional extensions (PostgreSQL contrib) are missing.
+    extras_missing: bool,
+    /// An admin password is set.
+    secured: bool,
 }
 
 /// One of Corral's own background services, with live status.
@@ -256,6 +260,8 @@ fn overview_inner(app: &AppHandle, state: &AppState) -> anyhow::Result<Overview>
         .instances
         .into_iter()
         .map(|(name, i)| ServiceView {
+            extras_missing: !corral_services::extras_installed(paths, &i),
+            secured: corral_services::auth::password(paths, &name).is_some(),
             name,
             kind: i.kind.as_str().into(),
             label: i.kind.label(),
@@ -1004,6 +1010,165 @@ async fn service_uninstall(
     ov!(app, state)
 }
 
+/// Host, port, user, password and ready-made settings for one service.
+#[tauri::command]
+fn service_connection(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<corral_services::auth::Connection> {
+    corral_services::auth::connection(&state.paths, &name).map_err(err)
+}
+
+/// Set (or with `null`, remove) a service's admin password, then re-render
+/// so tools (phpMyAdmin, pgweb, Redis Commander) use the new credentials.
+#[tauri::command]
+async fn set_service_password(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    password: Option<String>,
+) -> CmdResult<Overview> {
+    corral_services::auth::set_password(
+        &state.paths,
+        &name,
+        password.as_deref().filter(|p| !p.is_empty()),
+    )
+    .await
+    .map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+#[tauri::command]
+fn generate_password() -> CmdResult<String> {
+    corral_services::auth::generate().map_err(err)
+}
+
+/// Build and add a service's optional extensions (PostgreSQL contrib).
+#[tauri::command]
+async fn install_service_extras(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<Overview> {
+    corral_services::install_extras(&state.paths, &name)
+        .await
+        .map_err(err)?;
+    ov!(app, state)
+}
+
+#[tauri::command]
+async fn backup_options(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<corral_services::backup::Options> {
+    corral_services::backup::options(&state.paths, &name)
+        .await
+        .map_err(err)
+}
+
+/// Back up one database (or all, when `database` is null) to `dest`.
+/// Returns the file size in bytes.
+#[tauri::command]
+async fn backup_database(
+    state: State<'_, AppState>,
+    name: String,
+    database: Option<String>,
+    format: corral_services::backup::Format,
+    dest: String,
+) -> CmdResult<u64> {
+    let dest = std::path::PathBuf::from(dest);
+    if !dest.is_absolute() {
+        return Err("choose where to save the backup".into());
+    }
+    corral_services::backup::backup(
+        &state.paths,
+        &name,
+        database.as_deref().filter(|d| !d.is_empty()),
+        format,
+        &dest,
+    )
+    .await
+    .map_err(err)
+}
+
+/// Restore `file` into `database` (created if missing), or replay a
+/// whole-server backup when `database` is null.
+#[tauri::command]
+async fn restore_database(
+    state: State<'_, AppState>,
+    name: String,
+    database: Option<String>,
+    file: String,
+) -> CmdResult<()> {
+    corral_services::backup::restore(
+        &state.paths,
+        &name,
+        database.as_deref().filter(|d| !d.is_empty()),
+        std::path::Path::new(&file),
+    )
+    .await
+    .map_err(err)
+}
+
+/// Delete an installed PHP version. Refuses the default version and versions
+/// sites are pinned to; the engine stops that version's pools on re-render.
+#[tauri::command]
+fn php_remove(app: AppHandle, state: State<'_, AppState>, version: String) -> CmdResult<Overview> {
+    let inst = find_php(&state, &version)?;
+    let v = inst.version.to_string();
+    let cfg = Config::load(&state.paths).map_err(err)?;
+    if cfg.default_php.as_deref() == Some(v.as_str()) {
+        return Err(format!(
+            "PHP {v} is the default. Make another version the default first."
+        ));
+    }
+    let pinned: Vec<String> = Registry::load(&state.paths)
+        .map_err(err)?
+        .resolve(&cfg)
+        .map_err(err)?
+        .into_iter()
+        .filter(|s| s.isolated && s.php.as_deref() == Some(v.as_str()))
+        .map(|s| s.host)
+        .collect();
+    if !pinned.is_empty() {
+        return Err(format!(
+            "PHP {v} is used by {}. Switch those sites to another version first.",
+            pinned.join(", ")
+        ));
+    }
+    if !state.paths.owns(&inst.dir) {
+        return Err(format!("refusing to delete {}", inst.dir.display()));
+    }
+    std::fs::remove_dir_all(&inst.dir).map_err(err)?;
+    let default = cfg.default_php.as_deref().and_then(PhpVersion::parse);
+    php::write_shims(&state.paths, default).map_err(err)?;
+    // Touch the config so a running engine re-renders and drops the pools.
+    cfg.save(&state.paths).map_err(err)?;
+    corral_engine::render(&state.paths).map_err(err)?;
+    ov!(app, state)
+}
+
+/// Delete an installed Node.js major. Removing the default is allowed only
+/// when it is the last one (the shims are removed with it).
+#[tauri::command]
+fn node_remove(app: AppHandle, state: State<'_, AppState>, major: u32) -> CmdResult<Overview> {
+    let mut cfg = Config::load(&state.paths).map_err(err)?;
+    let installed = corral_engine::node::installed(&state.paths);
+    if cfg.default_node == Some(major) && installed.len() > 1 {
+        return Err(format!(
+            "Node.js {major} is the default. Make another version the default first."
+        ));
+    }
+    corral_engine::node::remove(&state.paths, major).map_err(err)?;
+    if cfg.default_node == Some(major) {
+        cfg.default_node = None;
+        cfg.save(&state.paths).map_err(err)?;
+    }
+    corral_engine::node::write_shims(&state.paths, cfg.default_node).map_err(err)?;
+    ov!(app, state)
+}
+
 /// Start a public tunnel for a site (installing cloudflared on first use).
 #[tauri::command]
 async fn share_start(
@@ -1426,6 +1591,15 @@ pub fn run() {
             tool_install,
             tool_remove,
             service_uninstall,
+            install_service_extras,
+            service_connection,
+            set_service_password,
+            generate_password,
+            backup_options,
+            backup_database,
+            restore_database,
+            php_remove,
+            node_remove,
             site_logs
         ])
         .build(tauri::generate_context!())

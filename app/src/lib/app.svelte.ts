@@ -2,7 +2,7 @@
 // so busy/error handling is consistent everywhere.
 import { api, type Overview } from "$lib/api";
 
-export type View = "sites" | "site" | "services" | "mail" | "dumps" | "settings" | "php";
+export type View = "sites" | "site" | "services" | "runtimes" | "mail" | "dumps" | "settings" | "php";
 
 class AppState {
   data = $state<Overview | null>(null);

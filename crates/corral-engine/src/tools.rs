@@ -101,6 +101,18 @@ impl Tool {
     }
 }
 
+/// Admin password of the first instance of `kind` (see corral_services::auth).
+fn service_password(paths: &Paths, kind: Kind) -> Option<String> {
+    let file = ServicesFile::load(paths).ok()?;
+    let (name, _) = file.instances.iter().find(|(_, i)| i.kind == kind)?;
+    corral_services::auth::password(paths, name)
+}
+
+/// PHP single-quoted string literal.
+fn php_str(v: &str) -> String {
+    format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
 fn service_port(paths: &Paths, kind: Kind) -> Option<u16> {
     ServicesFile::load(paths)
         .ok()?
@@ -214,6 +226,7 @@ pub fn write_phpmyadmin_config(paths: &Paths) -> anyhow::Result<()> {
         }
     };
     let port = service_port(paths, Kind::Mysql).unwrap_or(3306);
+    let password = service_password(paths, Kind::Mysql);
     let tmp = dir.join("tmp");
     std::fs::create_dir_all(&tmp)?;
     let body = format!(
@@ -226,11 +239,19 @@ pub fn write_phpmyadmin_config(paths: &Paths) -> anyhow::Result<()> {
          $cfg['Servers'][$i]['port'] = '{port}';\n\
          $cfg['Servers'][$i]['auth_type'] = 'config';\n\
          $cfg['Servers'][$i]['user'] = 'root';\n\
-         $cfg['Servers'][$i]['password'] = '';\n\
-         $cfg['Servers'][$i]['AllowNoPassword'] = true;\n",
+         $cfg['Servers'][$i]['password'] = {pw};\n\
+         $cfg['Servers'][$i]['AllowNoPassword'] = {allow_none};\n",
         tmp = tmp.display().to_string().replace('\'', "\\'"),
+        pw = php_str(password.as_deref().unwrap_or("")),
+        allow_none = if password.is_some() { "false" } else { "true" },
     );
-    corral_core::fsutil::write_if_changed(&dir.join("config.inc.php"), body.as_bytes())?;
+    let config = dir.join("config.inc.php");
+    corral_core::fsutil::write_if_changed(&config, body.as_bytes())?;
+    {
+        // Holds the MySQL root password once one is set.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -386,25 +407,52 @@ pub fn spec(paths: &Paths, tool: Tool) -> Option<Spec> {
                 )),
                 None => args.push("--sessions".into()),
             }
-            Some(Spec::new("tool-pgweb", tool.dir(paths).join("pgweb"), log).args(args))
+            let mut s = Spec::new("tool-pgweb", tool.dir(paths).join("pgweb"), log).args(args);
+            // libpq-style: the password travels in the environment, not argv.
+            if let Some(pw) = service_password(paths, Kind::Postgres) {
+                s.env.push(("PGPASSWORD".into(), pw));
+            }
+            Some(s)
         }
         Tool::RedisCommander => {
             let port = service_port(paths, Kind::Valkey).unwrap_or(6379);
-            let mut s = Spec::new("tool-redis-commander", paths.bin.join("node"), log).args([
+            let password = service_password(paths, Kind::Valkey);
+            let mut args = vec![
                 rc_entry(paths).display().to_string(),
                 "--address".into(),
                 "127.0.0.1".into(),
                 "--port".into(),
                 REDIS_COMMANDER_PORT.to_string(),
-                "--redis-host".into(),
-                "127.0.0.1".into(),
-                "--redis-port".into(),
-                port.to_string(),
-                "--nosave".into(),
-            ]);
+            ];
+            // Without a password the connection is given on the command line.
+            // Redis Commander only takes a password there too (visible in
+            // `ps`), so a secured server's connection goes through
+            // node-config's NODE_CONFIG environment variable instead.
+            if password.is_none() {
+                args.extend([
+                    "--redis-host".into(),
+                    "127.0.0.1".into(),
+                    "--redis-port".into(),
+                    port.to_string(),
+                ]);
+            }
+            args.push("--nosave".into());
+            let mut s = Spec::new("tool-redis-commander", paths.bin.join("node"), log).args(args);
             // Keep its config out of the user's home directory.
             s.env
                 .push(("HOME".into(), tool.dir(paths).display().to_string()));
+            if let Some(pw) = password {
+                let conn = serde_json::json!({
+                    "connections": [{
+                        "label": "valkey",
+                        "host": "127.0.0.1",
+                        "port": port,
+                        "password": pw,
+                        "dbIndex": 0,
+                    }]
+                });
+                s.env.push(("NODE_CONFIG".into(), conn.to_string()));
+            }
             Some(s)
         }
         _ => None,

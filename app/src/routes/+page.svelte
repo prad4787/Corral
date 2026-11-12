@@ -12,6 +12,7 @@
   import DumpsView from "$lib/views/DumpsView.svelte";
   import SettingsView from "$lib/views/SettingsView.svelte";
   import PhpView from "$lib/views/PhpView.svelte";
+  import RuntimesView from "$lib/views/RuntimesView.svelte";
 
   let mails = $state<MailSummary[]>([]);
   let dumps = $state<Dump[]>([]);
@@ -83,7 +84,9 @@
         <DumpsView {dumps} {events} />
       {:else if app.view === "php" && app.phpVersion && app.data?.php.some((p) => p.version === app.phpVersion)}
         <PhpView />
-      {:else if app.view === "settings" || app.view === "php"}
+      {:else if app.view === "runtimes" || app.view === "php"}
+        <RuntimesView />
+      {:else if app.view === "settings"}
         <SettingsView bind:update />
       {:else}
         <SitesView />
